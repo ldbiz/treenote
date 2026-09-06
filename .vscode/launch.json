@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Tauri Development Debug",
+      "env": {
+        "TREENOTE_DEV_MODE": "1"
+      },
+      "cargo": {
+        "args": [
+          "build",
+          "--manifest-path=${workspaceFolder}/src-tauri/Cargo.toml",
+          "--no-default-features"
+        ]
+      },
+      "preLaunchTask": "ui:dev"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Tauri Production Debug",
+      "console": "internalConsole",
+      "cargo": {
+        "args": [
+          "build",
+          "--release",
+          "--manifest-path=${workspaceFolder}/src-tauri/Cargo.toml"
+        ]
+      },
+      "preLaunchTask": "ui:build"
+    }
+  ]
+}

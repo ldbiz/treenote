@@ -1,0 +1,5 @@
+{
+  // When true, Dev Mode is enabled for local development (Inspect Element, DevTools, etc.).
+  // This setting is mirrored via TREENOTE_DEV_MODE=1 in .vscode/launch.json and npm run tauri:dev.
+  "treenote.devMode": true
+}

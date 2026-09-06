@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: .\scripts\build_installer.ps1
+
+      - name: Publish draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: TreeNote ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          files: dist/installer/treenote-*-setup.exe

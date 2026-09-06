@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Options — Tree Note</title>
+    <style>
+      html, body { margin: 0; background: #ffffff; }
+      @media (prefers-color-scheme: dark) {
+        html, body { background: #1c1917; }
+      }
+    </style>
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("treenote-theme");
+          var dark =
+            stored === "dark" ||
+            (stored !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (stored === "light" || stored === "dark") {
+            document.documentElement.setAttribute("data-theme", stored);
+          }
+          document.documentElement.style.background = dark ? "#1c1917" : "#ffffff";
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/options-main.tsx"></script>
+  </body>
+</html>

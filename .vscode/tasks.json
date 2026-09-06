@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ui:dev",
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "dev"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "VITE v",
+          "endsPattern": "ready in"
+        }
+      }
+    },
+    {
+      "label": "ui:build",
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "build"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    }
+  ]
+}

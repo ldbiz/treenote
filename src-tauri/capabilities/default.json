@@ -1,0 +1,26 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": [
+    "main",
+    "options"
+  ],
+  "permissions": [
+    "core:default",
+    "core:app:allow-set-app-theme",
+    "core:window:allow-set-theme",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus",
+    "core:webview:allow-create-webview-window",
+    "opener:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-message",
+    "dialog:allow-confirm",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
+  ]
+}
