@@ -15,6 +15,7 @@ import {
   HeadlessFlatTreeItemProps,
   FlatTreeItemProps,
   Input,
+  useRestoreFocusTarget,
 } from "@fluentui/react-components";
 import {
   DndContext,
@@ -43,6 +44,12 @@ import NodeContextMenu, {
   type NodeContextMenuAction,
 } from "./NodeContextMenu";
 import { isContextMenuKey } from "./popupMenu";
+import {
+  computeTreePageSize,
+  resolveTreeKeyboardAction,
+  type TreeKeyboardItemMeta,
+} from "../lib/treeKeyboard";
+import { cancelTreeFocus, focusTreeNode } from "../lib/treeFocus";
 
 // --- Data Structures ---
 
@@ -217,6 +224,7 @@ const SelectableDraggableFlatTreeItem = ({
   const hasMoved = useRef(false);
   const startPos = useRef<{ x: number; y: number } | null>(null);
   const suppressNextClickRef = useRef(false);
+  const restoreFocusTargetAttribute = useRestoreFocusTarget();
 
   // Setup drag and drop hooks
   const {
@@ -310,6 +318,7 @@ const SelectableDraggableFlatTreeItem = ({
       onRename(value as string, trimmedValue);
     }
     setIsRenaming(false);
+    focusTreeNode(value as string);
   }, [isRenaming, renameValue, layout, onRename, value, clearLongPressTimer]);
 
   // Cancel renaming (on Escape)
@@ -317,7 +326,8 @@ const SelectableDraggableFlatTreeItem = ({
     if (!isRenaming) return;
     setIsRenaming(false);
     setRenameValue(layout);
-  }, [isRenaming, layout]);
+    focusTreeNode(value as string);
+  }, [isRenaming, layout, value]);
 
   // Handle key presses in the input
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -530,6 +540,7 @@ const SelectableDraggableFlatTreeItem = ({
       {...(isDraggableProp && !isRenaming ? attributes : {})}
       {...(isDraggableProp && !isRenaming ? filteredDragListeners : {})}
       {...rest}
+      {...restoreFocusTargetAttribute}
       aria-selected={isActuallySelected}
       onFocus={(e) => {
         rest.onFocus?.(e);
@@ -605,6 +616,7 @@ const SelectableDraggableFlatTreeItem = ({
           if (hasChildren) {
             onToggleOpen();
           }
+          focusTreeNode(value as string);
           e.stopPropagation();
         }}
         draggable={false}
@@ -640,6 +652,7 @@ interface TreeComponentProps {
   selectedNodeId: string | null;
   onNodeSelect: (id: string) => void;
   onDeleteNode: (nodeId: string) => void;
+  onActivateNode?: () => void;
   onExportNode: (nodeId: string) => Promise<void>;
   focusNodeIds: Set<string> | null; // These are the direct matches when filtering is on
   isTreeCurrentlyFiltered: boolean; // New: Is the tree visually filtering nodes?
@@ -661,6 +674,7 @@ interface TreeComponentHandle {
   ensureNodeIsOpen: (id: string) => void;
   getAllNodeIdsInOrder: () => string[];
   scrollNodeIntoView: (id: string) => void;
+  focusNode: (id: string) => void;
   getAllNodeIdsRecursive: () => string[];
 }
 
@@ -917,6 +931,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       selectedNodeId,
       onNodeSelect,
       onDeleteNode,
+      onActivateNode,
       onExportNode,
       focusNodeIds, // Direct matches for filtering
       isTreeCurrentlyFiltered, // Is the tree visually filtered?
@@ -942,6 +957,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       y: number;
     } | null>(null);
     const [renameRequestId, setRenameRequestId] = useState<string | null>(null);
+    const treeScrollerRef = useRef<HTMLDivElement>(null);
 
     const reloadTreeFromBackend = useCallback(
       async (preserveOpenItems: Set<UniqueIdentifier>) => {
@@ -1109,10 +1125,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         if (parentId !== undefined) {
           setOpenItems((prevOpen) => new Set(prevOpen).add(parentId));
         }
-        setTimeout(() => {
-          const element = document.getElementById(`tree-item-${duplicated.id}`);
-          element?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-        }, 50);
+        focusTreeNode(duplicated.id);
       },
       [items, openItems, reloadTreeFromBackend, onNodeSelect]
     );
@@ -1133,6 +1146,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         }
         if (action === "export") {
           await onExportNode(nodeId);
+          focusTreeNode(nodeId, { retry: true });
           return;
         }
         if (action === "delete") {
@@ -1260,6 +1274,150 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       },
       [persistSiblingReorder]
     );
+
+    const processTreeKeyboard = useCallback(
+      (event: KeyboardEvent) => {
+        if (document.querySelector('[role="dialog"]')) return;
+
+        const target = event.target as HTMLElement;
+        if (
+          target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable
+        ) {
+          return;
+        }
+        if (target.closest(".node-context-menu, .editor-context-menu")) return;
+        if (target.closest(".toolbar, .search-bar, #note-editor, .editor-textarea, .splitter")) {
+          return;
+        }
+
+        const active = document.activeElement as HTMLElement | null;
+        if (
+          active?.closest(
+            ".toolbar, .search-bar, #note-editor, .editor-textarea, [role='dialog'], .splitter",
+          )
+        ) {
+          return;
+        }
+
+        const focusInTree = !!(
+          active && treeScrollerRef.current?.contains(active)
+        );
+        const focusLostToChrome =
+          !active ||
+          active === document.body ||
+          active === document.documentElement;
+        const focusInTreePanel = !!active?.closest(
+          ".tree-panel, .tree-scroller",
+        );
+
+        if (!focusInTree && !focusLostToChrome && !focusInTreePanel) return;
+        if (!selectedNodeId && !focusInTree && !focusInTreePanel) return;
+
+        const visibleItems = Array.from(flatTree.items());
+        const visibleIds = visibleItems.map((item) => String(item.value));
+
+        const keyboardItemMeta = new Map<string, TreeKeyboardItemMeta>();
+        for (const item of visibleItems) {
+          const id = String(item.value);
+          const parentValue = itemMap.get(item.value)?.parentValue;
+          keyboardItemMeta.set(id, {
+            parentId: parentValue !== undefined ? String(parentValue) : null,
+            hasChildren: parentIds.has(item.value),
+            isOpen: openItems.has(item.value),
+          });
+        }
+
+        const scroller = treeScrollerRef.current;
+        const rowEl = selectedNodeId
+          ? document.getElementById(`tree-item-${selectedNodeId}`)
+          : visibleIds.length > 0
+            ? document.getElementById(`tree-item-${visibleIds[0]}`)
+            : null;
+        const rowHeight = rowEl?.getBoundingClientRect().height ?? 32;
+        const pageSize = computeTreePageSize(
+          scroller?.clientHeight ?? 0,
+          rowHeight,
+        );
+
+        const action = resolveTreeKeyboardAction({
+          visibleIds,
+          itemMeta: keyboardItemMeta,
+          currentId: selectedNodeId,
+          pageSize,
+          key: event.key,
+          ctrlKey: event.ctrlKey,
+          altKey: event.altKey,
+          metaKey: event.metaKey,
+          shiftKey: event.shiftKey,
+        });
+
+        if (!action) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        switch (action.type) {
+          case "select":
+            onNodeSelect(action.id);
+            focusTreeNode(action.id);
+            break;
+          case "toggleOpen":
+            toggleNodeOpen(action.id);
+            if (!active?.closest('[role="treeitem"]')) {
+              focusTreeNode(action.id);
+            }
+            break;
+          case "delete":
+            onDeleteNode(action.id);
+            break;
+          case "activate":
+            cancelTreeFocus();
+            onActivateNode?.();
+            break;
+          case "leave":
+            cancelTreeFocus();
+            if (action.direction === "forward") {
+              const splitter = document.querySelector(
+                '.splitter[tabindex="0"]',
+              ) as HTMLElement | null;
+              if (splitter) {
+                splitter.focus();
+              } else {
+                const editor = document.getElementById("note-editor");
+                if (editor) editor.focus();
+                else onActivateNode?.();
+              }
+            } else {
+              const buttons = document.querySelectorAll<HTMLButtonElement>(
+                ".toolbar button:not(:disabled)",
+              );
+              buttons[buttons.length - 1]?.focus();
+            }
+            break;
+          case "suppress":
+            break;
+        }
+      },
+      [
+        flatTree,
+        itemMap,
+        parentIds,
+        openItems,
+        selectedNodeId,
+        onNodeSelect,
+        onDeleteNode,
+        onActivateNode,
+        toggleNodeOpen,
+      ],
+    );
+
+    useEffect(() => {
+      document.addEventListener("keydown", processTreeKeyboard, true);
+      return () =>
+        document.removeEventListener("keydown", processTreeKeyboard, true);
+    }, [processTreeKeyboard]);
 
     // --- Insert Root After Selected ---
     const insertRootAfterSelected = useCallback(
@@ -1457,6 +1615,9 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             element.scrollIntoView({ behavior: "smooth", block: "nearest" });
           }
         },
+        focusNode: (id: string) => {
+          focusTreeNode(id);
+        },
         getAllNodeIdsRecursive: () => {
           return collectAllNodeIds(treeData);
         },
@@ -1503,7 +1664,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           width: "100%",
         }}
       >
-        <div style={{ flex: 1, overflow: "auto", position: "relative" }}>
+        <div ref={treeScrollerRef} className="tree-scroller">
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -1515,7 +1676,6 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                 style={{
                   height: "100%",
                   width: "100%",
-                  overflow: "auto",
                   paddingTop: "2px",
                   boxSizing: "border-box",
                 }}
@@ -1582,11 +1742,27 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             onClose={({ reason, restoreFocus }) => {
               const nodeId = contextMenu?.nodeId;
               closeContextMenu();
-              if (reason === "dismiss" && restoreFocus && nodeId) {
-                requestAnimationFrame(() => {
-                  document.getElementById(`tree-item-${nodeId}`)?.focus();
-                });
+              if (reason !== "dismiss" || !nodeId) return;
+              if (restoreFocus) {
+                focusTreeNode(nodeId, { retry: true });
+                return;
               }
+              requestAnimationFrame(() => {
+                const active = document.activeElement as HTMLElement | null;
+                if (
+                  active?.closest('[role="treeitem"]') &&
+                  active.id !== `tree-item-${nodeId}`
+                ) {
+                  return;
+                }
+                if (
+                  !active ||
+                  active === document.body ||
+                  active.closest(".tree-panel, .tree-scroller")
+                ) {
+                  focusTreeNode(nodeId, { retry: true });
+                }
+              });
             }}
           />
         </div>

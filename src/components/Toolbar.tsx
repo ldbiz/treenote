@@ -1,4 +1,5 @@
 import type { FC } from "react";
+import { useRestoreFocusTarget } from "@fluentui/react-components";
 import { Add, Delete, Down, Settings, Tree, Up } from "./icons";
 
 interface ToolbarProps {
@@ -24,6 +25,8 @@ const Toolbar: FC<ToolbarProps> = ({
   canDelete,
   onOpenOptions,
 }) => {
+  const deleteRestoreFocusTarget = useRestoreFocusTarget();
+
   return (
     <div className="toolbar">
       <button
@@ -73,6 +76,7 @@ const Toolbar: FC<ToolbarProps> = ({
         aria-label="Delete Note"
         onClick={onDelete}
         disabled={!canDelete}
+        {...deleteRestoreFocusTarget}
       >
         <Delete width={18} height={18} aria-hidden={true} />
       </button>
