@@ -263,14 +263,20 @@ body {
 /* ── Tree panel ──────────────────────────────────────────── */
 .tree-panel {
   background-color: var(--panel-bg);
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
   color: var(--text);
   white-space: nowrap;
   min-width: 0;
   min-height: 0;
   border-right: 1px solid var(--border);
   font-family: var(--editor-font-family, inherit);
+}
+
+.tree-scroller {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
 }
 
 /* Override Fluent UI tree item styles */

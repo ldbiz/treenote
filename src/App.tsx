@@ -23,6 +23,7 @@ import {
   type FlushRequest,
 } from "./lib/editorFlushBridge";
 import { createNoteSelectionQueue } from "./lib/noteSelection";
+import { focusTreeNode } from "./lib/treeFocus";
 import "./styles/theme.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -44,6 +45,7 @@ interface AppTreeComponentHandle {
   ensureNodeIsOpen: (id: string) => void;
   getAllNodeIdsInOrder: () => string[];
   scrollNodeIntoView: (id: string) => void;
+  focusNode: (id: string) => void;
   getAllNodeIdsRecursive: () => string[];
   // clearFilter: () => void; // Removed as TreeComponent no longer has this method
 }
@@ -86,6 +88,7 @@ function App() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const mainUiRef = useRef<HTMLDivElement>(null);
+  const deleteDialogFocusIdRef = useRef<string | null>(null);
 
   const requestNodeSelect = useCallback(
     createNoteSelectionQueue(
@@ -416,10 +419,9 @@ function App() {
     if (parentId) treeRef.current?.ensureNodeIsOpen(parentId);
     setSelectedNodeId(nextSelectedId);
     setPendingDeleteId(null);
+    deleteDialogFocusIdRef.current = null;
     if (nextSelectedId) {
-      window.setTimeout(() => {
-        document.getElementById(`tree-item-${nextSelectedId}`)?.focus();
-      }, 50);
+      focusTreeNode(nextSelectedId);
     }
   }, [isDeleting]);
 
@@ -429,12 +431,24 @@ function App() {
 
     if (treeRef.current.hasChildren(targetId)) {
       setDeleteError(null);
+      deleteDialogFocusIdRef.current = targetId;
       setPendingDeleteId(targetId);
       return;
     }
 
     void executeDelete(targetId);
   }, [executeDelete, isDeleting, selectedNodeId]);
+
+  const restoreDeleteDialogFocus = useCallback(() => {
+    const restoreId = deleteDialogFocusIdRef.current ?? selectedNodeId;
+    if (restoreId) {
+      focusTreeNode(restoreId);
+    }
+  }, [selectedNodeId]);
+
+  const handleActivateNode = useCallback(() => {
+    textPanelRef.current?.focusEditor();
+  }, []);
 
   const handleExportNode = useCallback(async (nodeId: string) => {
     let label = "branch";
@@ -628,6 +642,7 @@ function App() {
           onConfirm={() => {
             if (pendingDeleteId) void executeDelete(pendingDeleteId);
           }}
+          onAfterClose={restoreDeleteDialogFocus}
         />
         <Toolbar
           onMoveUp={handleMoveUp}
@@ -663,6 +678,7 @@ function App() {
                 selectedNodeId={selectedNodeId}
                 onNodeSelect={handleNodeSelect}
                 onDeleteNode={(nodeId) => void handleDelete(nodeId)}
+                onActivateNode={handleActivateNode}
                 onExportNode={handleExportNode}
                 focusNodeIds={treeFocusNodeIds}
                 isTreeCurrentlyFiltered={isTreeCurrentlyFilteredReal}

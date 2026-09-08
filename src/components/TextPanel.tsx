@@ -17,6 +17,7 @@ import { createNoteContentSession } from "../lib/noteContentSession";
 
 export interface TextPanelHandle {
   flushPendingEdit: () => Promise<void>;
+  focusEditor: () => void;
 }
 
 interface TextPanelProps {
@@ -126,7 +127,20 @@ const TextPanel = forwardRef<TextPanelHandle, TextPanelProps>(({
     }
   }, [syncFromSession]);
 
-  useImperativeHandle(ref, () => ({ flushPendingEdit }), [flushPendingEdit]);
+  useImperativeHandle(
+    ref,
+    () => ({
+      flushPendingEdit,
+      focusEditor: () => {
+        if (textareaRef.current && !textareaRef.current.disabled) {
+          textareaRef.current.focus();
+          return;
+        }
+        highlightPaneRef.current?.focus();
+      },
+    }),
+    [flushPendingEdit],
+  );
 
   useEffect(() => {
     const session = sessionRef.current;
@@ -699,6 +713,7 @@ const TextPanel = forwardRef<TextPanelHandle, TextPanelProps>(({
           ) : (
             <textarea
               ref={textareaRef}
+              id="note-editor"
               className="editor-textarea"
               data-app-editor-menu=""
               value={text}
