@@ -421,7 +421,7 @@ function App() {
     setPendingDeleteId(null);
     deleteDialogFocusIdRef.current = null;
     if (nextSelectedId) {
-      focusTreeNode(nextSelectedId);
+      focusTreeNode(nextSelectedId, { retry: true });
     }
   }, [isDeleting]);
 
@@ -442,7 +442,7 @@ function App() {
   const restoreDeleteDialogFocus = useCallback(() => {
     const restoreId = deleteDialogFocusIdRef.current ?? selectedNodeId;
     if (restoreId) {
-      focusTreeNode(restoreId);
+      focusTreeNode(restoreId, { retry: true });
     }
   }, [selectedNodeId]);
 

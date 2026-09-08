@@ -32,6 +32,7 @@ function action(
     ctrlKey: false,
     altKey: false,
     metaKey: false,
+    shiftKey: false,
     ...overrides,
   });
 }
@@ -162,5 +163,25 @@ describe("resolveTreeKeyboardAction", () => {
     });
     expect(action({ key: "Enter" })).toEqual({ type: "activate" });
     expect(action({ key: "Backspace" })).toBeNull();
+  });
+
+  it("Tab leaves the tree instead of moving to the next row", () => {
+    expect(action({ key: "Tab" })).toEqual({
+      type: "leave",
+      direction: "forward",
+    });
+    expect(action({ key: "Tab", shiftKey: true })).toEqual({
+      type: "leave",
+      direction: "backward",
+    });
+    expect(action({ key: "Tab", currentId: null })).toEqual({
+      type: "leave",
+      direction: "forward",
+    });
+  });
+
+  it("Space is suppressed so the panel does not scroll", () => {
+    expect(action({ key: " " })).toEqual({ type: "suppress" });
+    expect(action({ key: " ", currentId: null })).toEqual({ type: "suppress" });
   });
 });

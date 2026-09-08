@@ -49,7 +49,7 @@ import {
   resolveTreeKeyboardAction,
   type TreeKeyboardItemMeta,
 } from "../lib/treeKeyboard";
-import { focusTreeNode } from "../lib/treeFocus";
+import { cancelTreeFocus, focusTreeNode } from "../lib/treeFocus";
 
 // --- Data Structures ---
 
@@ -1146,7 +1146,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         }
         if (action === "export") {
           await onExportNode(nodeId);
-          focusTreeNode(nodeId);
+          focusTreeNode(nodeId, { retry: true });
           return;
         }
         if (action === "delete") {
@@ -1315,10 +1315,6 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         if (!focusInTree && !focusLostToChrome && !focusInTreePanel) return;
         if (!selectedNodeId && !focusInTree && !focusInTreePanel) return;
 
-        if (!active?.closest('[role="treeitem"]') && selectedNodeId) {
-          focusTreeNode(selectedNodeId);
-        }
-
         const visibleItems = Array.from(flatTree.items());
         const visibleIds = visibleItems.map((item) => String(item.value));
 
@@ -1354,6 +1350,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           ctrlKey: event.ctrlKey,
           altKey: event.altKey,
           metaKey: event.metaKey,
+          shiftKey: event.shiftKey,
         });
 
         if (!action) return;
@@ -1368,12 +1365,38 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             break;
           case "toggleOpen":
             toggleNodeOpen(action.id);
+            if (!active?.closest('[role="treeitem"]')) {
+              focusTreeNode(action.id);
+            }
             break;
           case "delete":
             onDeleteNode(action.id);
             break;
           case "activate":
+            cancelTreeFocus();
             onActivateNode?.();
+            break;
+          case "leave":
+            cancelTreeFocus();
+            if (action.direction === "forward") {
+              const splitter = document.querySelector(
+                '.splitter[tabindex="0"]',
+              ) as HTMLElement | null;
+              if (splitter) {
+                splitter.focus();
+              } else {
+                const editor = document.getElementById("note-editor");
+                if (editor) editor.focus();
+                else onActivateNode?.();
+              }
+            } else {
+              const buttons = document.querySelectorAll<HTMLButtonElement>(
+                ".toolbar button:not(:disabled)",
+              );
+              buttons[buttons.length - 1]?.focus();
+            }
+            break;
+          case "suppress":
             break;
         }
       },
@@ -1721,7 +1744,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
               closeContextMenu();
               if (reason !== "dismiss" || !nodeId) return;
               if (restoreFocus) {
-                focusTreeNode(nodeId);
+                focusTreeNode(nodeId, { retry: true });
                 return;
               }
               requestAnimationFrame(() => {
@@ -1737,7 +1760,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                   active === document.body ||
                   active.closest(".tree-panel, .tree-scroller")
                 ) {
-                  focusTreeNode(nodeId);
+                  focusTreeNode(nodeId, { retry: true });
                 }
               });
             }}

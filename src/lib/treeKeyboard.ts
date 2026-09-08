@@ -8,7 +8,9 @@ export type TreeKeyboardAction =
   | { type: "select"; id: string }
   | { type: "toggleOpen"; id: string }
   | { type: "delete"; id: string }
-  | { type: "activate" };
+  | { type: "activate" }
+  | { type: "leave"; direction: "forward" | "backward" }
+  | { type: "suppress" };
 
 export type TreeKeyboardInput = {
   visibleIds: string[];
@@ -19,6 +21,7 @@ export type TreeKeyboardInput = {
   ctrlKey: boolean;
   altKey: boolean;
   metaKey: boolean;
+  shiftKey: boolean;
 };
 
 export function computeTreePageSize(
@@ -63,9 +66,17 @@ export function resolveTreeKeyboardAction(
     ctrlKey,
     altKey,
     metaKey,
+    shiftKey,
   } = input;
 
   if (ctrlKey || altKey || metaKey) return null;
+
+  if (key === "Tab") {
+    return { type: "leave", direction: shiftKey ? "backward" : "forward" };
+  }
+  if (key === " ") {
+    return { type: "suppress" };
+  }
 
   const currentIndex = currentId ? visibleIds.indexOf(currentId) : -1;
   const hasCurrentInList = currentIndex >= 0;
