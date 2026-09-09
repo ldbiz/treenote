@@ -212,9 +212,27 @@ mod tests {
         assert!(iss.contains("ExistingDataRoot"));
         assert!(iss.contains("{userappdata}\\treenote"));
         assert!(!iss.contains("uninsneveruninstall"));
-        assert!(!iss.contains("uninsdelete"));
         assert!(!iss.contains("notebook_root"));
         assert!(!iss.contains("notebook_root.pending"));
+
+        let data_root_line = iss
+            .lines()
+            .find(|line| line.contains("ValueName: \"DataRoot\""))
+            .expect("DataRoot registry line");
+        assert!(!data_root_line.contains("uninsdelete"));
+
+        for line in iss.lines() {
+            if line.contains("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+                && line.contains("TreeNote")
+            {
+                assert!(line.contains("dontcreatekey"));
+                assert!(line.contains("uninsdeletevalue"));
+            }
+            if line.contains("StartupApproved\\Run") && line.contains("TreeNote") {
+                assert!(line.contains("dontcreatekey"));
+                assert!(line.contains("uninsdeletevalue"));
+            }
+        }
     }
 
     #[test]
