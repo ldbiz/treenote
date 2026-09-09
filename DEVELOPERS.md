@@ -28,8 +28,6 @@ Use the **Tauri Development Debug** launch configuration in `.vscode/launch.json
 
 - `src/` — React frontend
 - `src/lib/treeDepth.ts` — shared 20-level nesting cap (`MAX_TREE_LEVEL`)
-- `src/lib/treeDropCollision.ts` — drag-and-drop hit testing (row under the pointer, not nearest centre)
-- `src-tauri/` — Rust backend
 - `src-tauri/` — Rust backend
 - `src-tauri/src/main.rs` — backend entry point
 - `src-tauri/src/tree.rs` — tree data structures

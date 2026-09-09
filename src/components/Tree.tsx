@@ -21,6 +21,7 @@ import {
   DndContext,
   PointerSensor,
   UniqueIdentifier,
+  closestCenter,
   useSensor,
   useSensors,
   useDraggable,
@@ -56,10 +57,6 @@ import {
   nodeLevel,
   wouldExceedMaxLevel,
 } from "../lib/treeDepth";
-import {
-  ROOT_DROP_AREA_ID,
-  detectTreeDropCollision,
-} from "../lib/treeDropCollision";
 
 // --- Data Structures ---
 
@@ -1206,7 +1203,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         let nextOpenItems = new Set(openItems);
         let moveSucceeded = false;
 
-        if (over && active.id !== over.id && over.id !== ROOT_DROP_AREA_ID) {
+        if (over && active.id !== over.id && over.id !== "root-drop-area") {
           const targetNodeExists = items.some((item) => item.value === over.id);
           if (!targetNodeExists) {
             console.warn(`DragEnd: Target node ${over.id} not found in items.`);
@@ -1234,7 +1231,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             String(over.id),
             movePlan.sortOrder
           );
-        } else if (active.id && (!over || over.id === ROOT_DROP_AREA_ID)) {
+        } else if (active.id && (!over || over.id === "root-drop-area")) {
           if (wouldExceedMaxLevel(items, active.id, null)) {
             await showMessage(DEPTH_LIMIT_MOVE_MESSAGE, {
               title: "Move note",
@@ -1721,11 +1718,11 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         <div ref={treeScrollerRef} className="tree-scroller">
           <DndContext
             sensors={sensors}
-            collisionDetection={detectTreeDropCollision}
+            collisionDetection={closestCenter}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEndWithCleanup}
           >
-            <DropArea id={ROOT_DROP_AREA_ID}>
+            <DropArea id="root-drop-area">
               <div
                 style={{
                   height: "100%",
