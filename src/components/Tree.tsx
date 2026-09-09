@@ -378,14 +378,23 @@ const SelectableDraggableFlatTreeItem = ({
 
   // --- Styling and Rendering ---
 
-  const style: React.CSSProperties = {
+  // Fluent only pre-generates indent classes for levels 1–10. Levels 11+
+  // need --fluent-TreeItem--level on the row. Set it here as a unitless
+  // string so our drag `style` cannot replace Fluent's fallback.
+  const indentLevel =
+    typeof rest["aria-level"] === "number" && rest["aria-level"] >= 1
+      ? rest["aria-level"]
+      : 1;
+
+  const style = {
     transform: CSS.Transform.toString(transform),
     opacity: isDragging ? 0.5 : 1,
     zIndex: isDragging ? 1 : 0,
     position: "relative",
     cursor: isRenaming ? "default" : isDragging ? "grabbing" : "default",
     touchAction: "none",
-  };
+    ["--fluent-TreeItem--level"]: String(indentLevel),
+  } as React.CSSProperties;
 
   const isActuallySelected = value === selectedNodeId;
 
@@ -545,11 +554,11 @@ const SelectableDraggableFlatTreeItem = ({
     <FlatTreeItem
       ref={setNodeRef}
       value={value}
-      style={style}
       data-app-context-menu=""
       {...(isDraggableProp && !isRenaming ? attributes : {})}
       {...(isDraggableProp && !isRenaming ? filteredDragListeners : {})}
       {...rest}
+      style={style}
       {...restoreFocusTargetAttribute}
       aria-selected={isActuallySelected}
       onFocus={(e) => {
