@@ -9,6 +9,7 @@ interface ToolbarProps {
   onNewTree: () => void;
   onNewChild: () => void;
   canNewChild: boolean;
+  newChildTitle?: string;
   onDelete: () => void;
   canDelete: boolean;
   onOpenOptions: () => void;
@@ -21,6 +22,7 @@ const Toolbar: FC<ToolbarProps> = ({
   onNewTree,
   onNewChild,
   canNewChild,
+  newChildTitle = "New Child Note",
   onDelete,
   canDelete,
   onOpenOptions,
@@ -39,8 +41,8 @@ const Toolbar: FC<ToolbarProps> = ({
       </button>
       <button
         type="button"
-        title="New Child Note"
-        aria-label="New Child Note"
+        title={newChildTitle}
+        aria-label={newChildTitle}
         onClick={onNewChild}
         disabled={!canNewChild}
       >

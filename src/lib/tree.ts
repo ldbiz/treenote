@@ -35,6 +35,12 @@ export function formatDefaultNodeTitle(date: Date = new Date()): string {
   return `${day} ${hours}:${minutes}:${seconds} ${year}/${month}/${dayOfMonth}`;
 }
 
+export function invokeErrorMessage(error: unknown): string {
+  if (typeof error === "string" && error.trim()) return error;
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return String(error);
+}
+
 export async function addNode(
   parentId: string | null,
   label: string
@@ -44,6 +50,10 @@ export async function addNode(
     return node;
   } catch (error) {
     console.error("Failed to add node:", error);
+    await showMessage(invokeErrorMessage(error), {
+      title: "Add note",
+      kind: "error",
+    });
     return null;
   }
 }
@@ -81,6 +91,10 @@ export async function moveNode(
     return true;
   } catch (error) {
     console.error("Failed to move node:", error);
+    await showMessage(invokeErrorMessage(error), {
+      title: "Move note",
+      kind: "error",
+    });
     return false;
   }
 }

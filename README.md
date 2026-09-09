@@ -8,9 +8,9 @@ Built with Tauri and SQLite. See [DEVELOPERS.md](DEVELOPERS.md) for technical de
 
 ## Features
 
-- **Tree Structure**: Organize your notes hierarchically in a tree structure
+- **Tree Structure**: Organize your notes hierarchically in a tree, up to 20 levels deep. Existing or imported notes deeper than that still open; you just cannot nest further under a note that is already at the limit.
 - **Plain Text Editing**: Simple text notes, nothing fancy
-- **Drag and Drop**: Easily reorganize your notes by dragging nodes
+- **Drag and Drop**: Easily reorganize your notes by dragging nodes. Drop onto a note to make it a child of that note. If a move would go past 20 levels, TreeNote explains why and leaves the note where it was.
 - **Persistent Storage**: All notes are automatically saved to a local database
 - **Responsive Layout**: Adjustable split view between tree and note content
 
@@ -24,7 +24,7 @@ After setup, TreeNote is in the Start Menu. The installer can also add a desktop
 
 ## Usage
 
-- **Create Notes**: Use the toolbar to create a new root node (tree icon) or a child of the selected node (plus icon). Child creation requires a selected node.
+- **Create Notes**: Use the toolbar to create a new root node (tree icon) or a child of the selected node (plus icon). Child creation requires a selected node. The plus button is disabled, with an explanation on hover, when the selected note is already 20 levels deep.
 - **Edit Notes**: Select a node and edit its content in the right panel. Changes autosave.
 - **Organize Notes**: Drag and drop nodes to reorganize your tree, or use the toolbar Move Up/Down buttons. Reordering is saved automatically.
 - **Rename Nodes**: Long-press on a node label to rename it, press **F2**, or right-click and choose **Rename**.
@@ -44,4 +44,4 @@ From **Settings → Conversion**, you can import notes into a new TreeNote noteb
 - **TreeNote JSON** — import from or export to TreeNote-formatted JSON.
 - **Flashnote** — import from or export to a Flashnote `.db` backup.
 
-Conversion preserves note titles, plain-text bodies, and parent/child hierarchy only. Formatting, images, attachments, and application-specific metadata are not preserved.
+Conversion preserves note titles, plain-text bodies, and parent/child hierarchy only. Formatting, images, attachments, and application-specific metadata are not preserved. Imports may be deeper than 20 levels; TreeNote keeps those notes but will not add or move a branch so that it becomes deeper than 20.

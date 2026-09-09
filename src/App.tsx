@@ -24,6 +24,7 @@ import {
 } from "./lib/editorFlushBridge";
 import { createNoteSelectionQueue } from "./lib/noteSelection";
 import { focusTreeNode } from "./lib/treeFocus";
+import { MAX_TREE_LEVEL } from "./lib/treeDepth";
 import "./styles/theme.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -87,6 +88,7 @@ function App() {
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [canAddChild, setCanAddChild] = useState(false);
   const mainUiRef = useRef<HTMLDivElement>(null);
   const deleteDialogFocusIdRef = useRef<string | null>(null);
 
@@ -650,7 +652,12 @@ function App() {
           canMove={!!selectedNodeId}
           onNewTree={handleNewTree}
           onNewChild={handleNewChild}
-          canNewChild={!!selectedNodeId}
+          canNewChild={canAddChild}
+          newChildTitle={
+            selectedNodeId && !canAddChild
+              ? `New child note (maximum depth of ${MAX_TREE_LEVEL} reached)`
+              : "New Child Note"
+          }
           onDelete={() => void handleDelete()}
           canDelete={!!selectedNodeId}
           onOpenOptions={() => void openOptionsWindow()}
@@ -680,6 +687,7 @@ function App() {
                 onDeleteNode={(nodeId) => void handleDelete(nodeId)}
                 onActivateNode={handleActivateNode}
                 onExportNode={handleExportNode}
+                onCanAddChildChange={setCanAddChild}
                 focusNodeIds={treeFocusNodeIds}
                 isTreeCurrentlyFiltered={isTreeCurrentlyFilteredReal}
                 allNodesWithSearchMatches={

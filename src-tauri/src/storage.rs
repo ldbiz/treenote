@@ -1205,9 +1205,91 @@ fn fetch_nodes_recursive(
     })?;
     iter.collect()
 }
+
+const MAX_TREE_LEVEL: i64 = 20;
+
+fn depth_limit_add_message() -> String {
+    format!(
+        "Notes can be nested up to {} levels. This note is already at the limit, so a child cannot be added here.",
+        MAX_TREE_LEVEL
+    )
+}
+
+fn depth_limit_move_message() -> String {
+    format!(
+        "Notes can be nested up to {} levels. Moving this branch here would nest it too deeply.",
+        MAX_TREE_LEVEL
+    )
+}
+
+fn note_level(conn: &Connection, id: &str) -> Result<i64, String> {
+    conn.query_row(
+        "WITH RECURSIVE walk(id, depth) AS (
+            SELECT id, 1 FROM notes WHERE id = ?1
+            UNION ALL
+            SELECT notes.parent_id, walk.depth + 1
+            FROM walk
+            JOIN notes ON notes.id = walk.id
+            WHERE notes.parent_id IS NOT NULL
+        )
+        SELECT COALESCE(MAX(depth), 0) FROM walk",
+        params![id],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn subtree_depth(conn: &Connection, id: &str) -> Result<i64, String> {
+    conn.query_row(
+        "WITH RECURSIVE walk(id, depth) AS (
+            SELECT id, 1 FROM notes WHERE id = ?1
+            UNION ALL
+            SELECT notes.id, walk.depth + 1
+            FROM notes
+            JOIN walk ON notes.parent_id = walk.id
+        )
+        SELECT COALESCE(MAX(depth), 0) FROM walk",
+        params![id],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn would_exceed_max_level(
+    conn: &Connection,
+    node_id: &str,
+    new_parent_id: Option<&str>,
+) -> Result<bool, String> {
+    let parent_level = match new_parent_id {
+        Some(parent_id) => note_level(conn, parent_id)?,
+        None => 0,
+    };
+    let depth = subtree_depth(conn, node_id)?;
+    let resulting = parent_level + depth;
+    if resulting <= MAX_TREE_LEVEL {
+        return Ok(false);
+    }
+    let current_max = note_level(conn, node_id)? + depth - 1;
+    Ok(resulting > current_max)
+}
+
 pub fn add_node(parent_id: Option<String>, label: String) -> Result<TreeNode, String> {
     let mut conn = db_connection()?;
+    add_node_in_conn(&mut conn, parent_id, label)
+}
+
+fn add_node_in_conn(
+    conn: &mut Connection,
+    parent_id: Option<String>,
+    label: String,
+) -> Result<TreeNode, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    if let Some(ref parent) = parent_id {
+        let parent_level = note_level(&tx, parent)?;
+        if parent_level >= MAX_TREE_LEVEL {
+            return Err(depth_limit_add_message());
+        }
+    }
     let id = Uuid::new_v4().to_string();
     tx.execute(
         "UPDATE notes SET sort_order = sort_order + 1 WHERE parent_id IS ?1",
@@ -1307,7 +1389,14 @@ fn move_node_in_conn(
                     "Cannot move a note under itself or one of its descendants".into(),
                 );
             }
+            if would_exceed_max_level(&tx, &id, Some(parent_id))? {
+                return Err(depth_limit_move_message());
+            }
         }
+    } else if old_parent_id != new_parent_id
+        && would_exceed_max_level(&tx, &id, None)?
+    {
+        return Err(depth_limit_move_message());
     }
 
     if old_parent_id == new_parent_id {
@@ -1813,6 +1902,56 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         assert_eq!(siblings, vec![("b".to_string(), 0), ("a".to_string(), 1)]);
+    }
+
+    fn insert_level_chain(conn: &Connection, count: i64, prefix: &str) -> String {
+        let mut parent: Option<String> = None;
+        let mut last = String::new();
+        for index in 1..=count {
+            let id = format!("{prefix}{index}");
+            insert_test_node(conn, &id, parent.as_deref(), &id, 0, "");
+            parent = Some(id.clone());
+            last = id;
+        }
+        last
+    }
+
+    #[test]
+    fn add_node_rejects_child_at_max_level() {
+        let mut conn = setup_test_conn();
+        let deepest = insert_level_chain(&conn, MAX_TREE_LEVEL, "n");
+        let err = add_node_in_conn(&mut conn, Some(deepest), "too deep".into())
+            .expect_err("depth cap");
+        assert!(err.contains("nested up to 20"));
+        assert!(err.contains("child cannot be added"));
+    }
+
+    #[test]
+    fn add_node_allows_child_just_below_max_level() {
+        let mut conn = setup_test_conn();
+        let parent = insert_level_chain(&conn, MAX_TREE_LEVEL - 1, "n");
+        add_node_in_conn(&mut conn, Some(parent), "ok".into()).expect("add");
+    }
+
+    #[test]
+    fn move_node_rejects_reparent_past_max_level() {
+        let mut conn = setup_test_conn();
+        let deepest = insert_level_chain(&conn, MAX_TREE_LEVEL, "n");
+        insert_test_node(&conn, "leaf", None, "Leaf", 1, "");
+        let err = move_node_in_conn(&mut conn, "leaf".into(), Some(deepest), 0)
+            .expect_err("depth cap");
+        assert!(err.contains("Moving this branch here would nest it too deeply"));
+    }
+
+    #[test]
+    fn move_node_allows_over_cap_branch_to_root() {
+        let mut conn = setup_test_conn();
+        insert_level_chain(&conn, MAX_TREE_LEVEL + 2, "n");
+        move_node_in_conn(&mut conn, "n3".into(), None, 0).expect("to root");
+        let parent: Option<String> = conn
+            .query_row("SELECT parent_id FROM notes WHERE id='n3'", [], |r| r.get(0))
+            .expect("parent");
+        assert_eq!(parent, None);
     }
 
     #[test]

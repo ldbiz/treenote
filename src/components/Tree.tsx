@@ -21,7 +21,6 @@ import {
   DndContext,
   PointerSensor,
   UniqueIdentifier,
-  closestCenter,
   useSensor,
   useSensors,
   useDraggable,
@@ -50,6 +49,17 @@ import {
   type TreeKeyboardItemMeta,
 } from "../lib/treeKeyboard";
 import { cancelTreeFocus, focusTreeNode } from "../lib/treeFocus";
+import {
+  DEPTH_LIMIT_ADD_MESSAGE,
+  DEPTH_LIMIT_MOVE_MESSAGE,
+  canAddChildAtLevel,
+  nodeLevel,
+  wouldExceedMaxLevel,
+} from "../lib/treeDepth";
+import {
+  ROOT_DROP_AREA_ID,
+  detectTreeDropCollision,
+} from "../lib/treeDropCollision";
 
 // --- Data Structures ---
 
@@ -659,6 +669,7 @@ interface TreeComponentProps {
   allNodesWithSearchMatches: Set<string> | null; // New: All nodes with matches, regardless of filtering
   searchQuery?: string; // Add searchQuery prop for label highlighting
   reloadKey?: number;
+  onCanAddChildChange?: (canAddChild: boolean) => void;
 }
 
 interface TreeComponentHandle {
@@ -938,6 +949,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       allNodesWithSearchMatches, // All nodes that have a match (for greying when not filtering)
       searchQuery, // Add searchQuery prop for label highlighting
       reloadKey,
+      onCanAddChildChange,
     },
     ref
   ) => {
@@ -1185,10 +1197,18 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         let nextOpenItems = new Set(openItems);
         let moveSucceeded = false;
 
-        if (over && active.id !== over.id && over.id !== "root-drop-area") {
+        if (over && active.id !== over.id && over.id !== ROOT_DROP_AREA_ID) {
           const targetNodeExists = items.some((item) => item.value === over.id);
           if (!targetNodeExists) {
             console.warn(`DragEnd: Target node ${over.id} not found in items.`);
+            return;
+          }
+
+          if (wouldExceedMaxLevel(items, active.id, over.id)) {
+            await showMessage(DEPTH_LIMIT_MOVE_MESSAGE, {
+              title: "Move note",
+              kind: "warning",
+            });
             return;
           }
 
@@ -1205,7 +1225,15 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             String(over.id),
             movePlan.sortOrder
           );
-        } else if (active.id && (!over || over.id === "root-drop-area")) {
+        } else if (active.id && (!over || over.id === ROOT_DROP_AREA_ID)) {
+          if (wouldExceedMaxLevel(items, active.id, null)) {
+            await showMessage(DEPTH_LIMIT_MOVE_MESSAGE, {
+              title: "Move note",
+              kind: "warning",
+            });
+            return;
+          }
+
           const movePlan = buildReparentMove(items, active.id, undefined);
           if (!movePlan) return;
 
@@ -1481,8 +1509,25 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       [items, openItems] // Dependencies
     );
 
+    useEffect(() => {
+      if (!selectedNodeId) {
+        onCanAddChildChange?.(false);
+        return;
+      }
+      onCanAddChildChange?.(
+        canAddChildAtLevel(nodeLevel(items, selectedNodeId)),
+      );
+    }, [items, selectedNodeId, onCanAddChildChange]);
+
     // --- Insert Child First ---
     const insertChildFirst = useCallback(async (parentId: string) => {
+      if (!canAddChildAtLevel(nodeLevel(items, parentId))) {
+        await showMessage(DEPTH_LIMIT_ADD_MESSAGE, {
+          title: "Add note",
+          kind: "warning",
+        });
+        return;
+      }
       const newNode = await addNode(parentId, formatDefaultNodeTitle());
       if (newNode) {
         setOpenItems((prevOpen) => {
@@ -1494,7 +1539,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         const initialFlatItems = convertToFlatData(treeData, null, initialOpen);
         setItems(initialFlatItems);
       }
-    }, []);
+    }, [items]);
 
     // --- EXPOSE METHODS VIA REF ---
     useImperativeHandle(
@@ -1667,11 +1712,11 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         <div ref={treeScrollerRef} className="tree-scroller">
           <DndContext
             sensors={sensors}
-            collisionDetection={closestCenter}
+            collisionDetection={detectTreeDropCollision}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEndWithCleanup}
           >
-            <DropArea id="root-drop-area">
+            <DropArea id={ROOT_DROP_AREA_ID}>
               <div
                 style={{
                   height: "100%",
