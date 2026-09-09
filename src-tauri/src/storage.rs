@@ -1904,6 +1904,114 @@ mod tests {
         assert_eq!(siblings, vec![("b".to_string(), 0), ("a".to_string(), 1)]);
     }
 
+    fn ordered_siblings(conn: &Connection, parent_id: Option<&str>) -> Vec<(String, i64)> {
+        conn.prepare(
+            "SELECT id, sort_order FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC",
+        )
+        .expect("prepare")
+        .query_map(params![parent_id], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))
+        .expect("query")
+        .filter_map(Result::ok)
+        .collect()
+    }
+
+    #[test]
+    fn move_node_insert_before_same_parent_moving_down() {
+        let mut conn = setup_test_conn();
+        insert_test_node(&conn, "root", None, "Root", 0, "");
+        insert_test_node(&conn, "n0", Some("root"), "N0", 0, "");
+        insert_test_node(&conn, "n1", Some("root"), "N1", 1, "");
+        insert_test_node(&conn, "n2", Some("root"), "N2", 2, "");
+
+        move_node_in_conn(&mut conn, "n2".into(), Some("root".into()), 0)
+            .expect("insert before moving down");
+
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![
+                ("n2".to_string(), 0),
+                ("n0".to_string(), 1),
+                ("n1".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn move_node_insert_before_same_parent_moving_up() {
+        let mut conn = setup_test_conn();
+        insert_test_node(&conn, "root", None, "Root", 0, "");
+        insert_test_node(&conn, "n0", Some("root"), "N0", 0, "");
+        insert_test_node(&conn, "n1", Some("root"), "N1", 1, "");
+        insert_test_node(&conn, "n2", Some("root"), "N2", 2, "");
+
+        move_node_in_conn(&mut conn, "n0".into(), Some("root".into()), 1)
+            .expect("insert before moving up");
+
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![
+                ("n1".to_string(), 0),
+                ("n0".to_string(), 1),
+                ("n2".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn move_node_insert_before_cross_parent_into_middle() {
+        let mut conn = setup_test_conn();
+        setup_move_test_tree(&conn);
+
+        move_node_in_conn(&mut conn, "a1".into(), Some("root".into()), 1)
+            .expect("cross-parent insert");
+
+        let a1_parent: Option<String> = conn
+            .query_row("SELECT parent_id FROM notes WHERE id='a1'", [], |r| r.get(0))
+            .expect("a1 parent");
+        assert_eq!(a1_parent, Some("root".to_string()));
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![
+                ("a".to_string(), 0),
+                ("a1".to_string(), 1),
+                ("b".to_string(), 2),
+            ]
+        );
+        assert_eq!(ordered_siblings(&conn, Some("a")), Vec::<(String, i64)>::new());
+    }
+
+    #[test]
+    fn move_node_insert_before_outdent_to_root_middle() {
+        let mut conn = setup_test_conn();
+        insert_test_node(&conn, "root", None, "Root", 0, "");
+        insert_test_node(&conn, "r0", Some("root"), "R0", 0, "");
+        insert_test_node(&conn, "r1", Some("root"), "R1", 1, "");
+        insert_test_node(&conn, "r2", Some("root"), "R2", 2, "");
+        insert_test_node(&conn, "branch", Some("r0"), "Branch", 0, "");
+        insert_test_node(&conn, "leaf", Some("branch"), "Leaf", 0, "");
+
+        move_node_in_conn(&mut conn, "leaf".into(), Some("root".into()), 1)
+            .expect("outdent to root middle");
+
+        let leaf_parent: Option<String> = conn
+            .query_row("SELECT parent_id FROM notes WHERE id='leaf'", [], |r| r.get(0))
+            .expect("leaf parent");
+        assert_eq!(leaf_parent, Some("root".to_string()));
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![
+                ("r0".to_string(), 0),
+                ("leaf".to_string(), 1),
+                ("r1".to_string(), 2),
+                ("r2".to_string(), 3),
+            ]
+        );
+        assert_eq!(
+            ordered_siblings(&conn, Some("branch")),
+            Vec::<(String, i64)>::new()
+        );
+    }
+
     fn insert_level_chain(conn: &Connection, count: i64, prefix: &str) -> String {
         let mut parent: Option<String> = None;
         let mut last = String::new();

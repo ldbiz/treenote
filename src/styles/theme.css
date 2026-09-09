@@ -279,6 +279,51 @@ body {
   position: relative;
 }
 
+.tree-panel .tree-drop-before {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 33%;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.tree-panel .tree-drop-before-active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: calc(
+    var(--tree-guide-base, 12px) +
+      (var(--fluent-TreeItem--level, 1) - 1) * var(--tree-guide-indent, 24px)
+  );
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.tree-panel .tree-scroller.tree-scroller-dragging .fui-FlatTreeItem:hover .fui-TreeItemLayout,
+.tree-panel .tree-scroller.tree-scroller-dragging .fui-TreeItemLayout:hover {
+  background-color: inherit !important;
+  color: inherit !important;
+}
+
+.tree-drag-overlay {
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--panel-bg);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Override Fluent UI tree item styles */
 .tree-panel .fui-TreeItemLayout {
   color: var(--text-muted);
