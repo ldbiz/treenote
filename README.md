@@ -8,7 +8,7 @@ Built with Tauri and SQLite. See [DEVELOPERS.md](DEVELOPERS.md) for technical de
 
 ## Features
 
-- **Tree Structure**: Organize your notes hierarchically in a tree structure
+- **Tree Structure**: Organize your notes hierarchically in a tree, up to 20 levels deep. Existing or imported notes deeper than that still open.
 - **Plain Text Editing**: Simple text notes, nothing fancy
 - **Drag and Drop**: Easily reorganize your notes by dragging nodes
 - **Persistent Storage**: All notes are automatically saved to a local database
@@ -44,4 +44,4 @@ From **Settings → Conversion**, you can import notes into a new TreeNote noteb
 - **TreeNote JSON** — import from or export to TreeNote-formatted JSON.
 - **Flashnote** — import from or export to a Flashnote `.db` backup.
 
-Conversion preserves note titles, plain-text bodies, and parent/child hierarchy only. Formatting, images, attachments, and application-specific metadata are not preserved.
+Conversion preserves note titles, plain-text bodies, and parent/child hierarchy only. Formatting, images, attachments, and application-specific metadata are not preserved. Imports may already be deeper than 20 levels; those notes are kept.

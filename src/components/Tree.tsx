@@ -50,6 +50,13 @@ import {
   type TreeKeyboardItemMeta,
 } from "../lib/treeKeyboard";
 import { cancelTreeFocus, focusTreeNode } from "../lib/treeFocus";
+import {
+  DEPTH_LIMIT_ADD_MESSAGE,
+  DEPTH_LIMIT_MOVE_MESSAGE,
+  canAddChildAtLevel,
+  nodeLevel,
+  wouldExceedMaxLevel,
+} from "../lib/treeDepth";
 
 // --- Data Structures ---
 
@@ -368,14 +375,23 @@ const SelectableDraggableFlatTreeItem = ({
 
   // --- Styling and Rendering ---
 
-  const style: React.CSSProperties = {
+  // Fluent only pre-generates indent classes for levels 1–10. Levels 11+
+  // need --fluent-TreeItem--level on the row. Set it here as a unitless
+  // string so our drag `style` cannot replace Fluent's fallback.
+  const indentLevel =
+    typeof rest["aria-level"] === "number" && rest["aria-level"] >= 1
+      ? rest["aria-level"]
+      : 1;
+
+  const style = {
     transform: CSS.Transform.toString(transform),
     opacity: isDragging ? 0.5 : 1,
     zIndex: isDragging ? 1 : 0,
     position: "relative",
     cursor: isRenaming ? "default" : isDragging ? "grabbing" : "default",
     touchAction: "none",
-  };
+    ["--fluent-TreeItem--level"]: String(indentLevel),
+  } as React.CSSProperties;
 
   const isActuallySelected = value === selectedNodeId;
 
@@ -535,11 +551,11 @@ const SelectableDraggableFlatTreeItem = ({
     <FlatTreeItem
       ref={setNodeRef}
       value={value}
-      style={style}
       data-app-context-menu=""
       {...(isDraggableProp && !isRenaming ? attributes : {})}
       {...(isDraggableProp && !isRenaming ? filteredDragListeners : {})}
       {...rest}
+      style={style}
       {...restoreFocusTargetAttribute}
       aria-selected={isActuallySelected}
       onFocus={(e) => {
@@ -659,6 +675,7 @@ interface TreeComponentProps {
   allNodesWithSearchMatches: Set<string> | null; // New: All nodes with matches, regardless of filtering
   searchQuery?: string; // Add searchQuery prop for label highlighting
   reloadKey?: number;
+  onCanAddChildChange?: (canAddChild: boolean) => void;
 }
 
 interface TreeComponentHandle {
@@ -938,6 +955,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       allNodesWithSearchMatches, // All nodes that have a match (for greying when not filtering)
       searchQuery, // Add searchQuery prop for label highlighting
       reloadKey,
+      onCanAddChildChange,
     },
     ref
   ) => {
@@ -1192,6 +1210,14 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             return;
           }
 
+          if (wouldExceedMaxLevel(items, active.id, over.id)) {
+            await showMessage(DEPTH_LIMIT_MOVE_MESSAGE, {
+              title: "Move note",
+              kind: "warning",
+            });
+            return;
+          }
+
           const movePlan = buildReparentMove(items, active.id, over.id);
           if (!movePlan) return;
 
@@ -1206,6 +1232,14 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             movePlan.sortOrder
           );
         } else if (active.id && (!over || over.id === "root-drop-area")) {
+          if (wouldExceedMaxLevel(items, active.id, null)) {
+            await showMessage(DEPTH_LIMIT_MOVE_MESSAGE, {
+              title: "Move note",
+              kind: "warning",
+            });
+            return;
+          }
+
           const movePlan = buildReparentMove(items, active.id, undefined);
           if (!movePlan) return;
 
@@ -1481,8 +1515,25 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       [items, openItems] // Dependencies
     );
 
+    useEffect(() => {
+      if (!selectedNodeId) {
+        onCanAddChildChange?.(false);
+        return;
+      }
+      onCanAddChildChange?.(
+        canAddChildAtLevel(nodeLevel(items, selectedNodeId)),
+      );
+    }, [items, selectedNodeId, onCanAddChildChange]);
+
     // --- Insert Child First ---
     const insertChildFirst = useCallback(async (parentId: string) => {
+      if (!canAddChildAtLevel(nodeLevel(items, parentId))) {
+        await showMessage(DEPTH_LIMIT_ADD_MESSAGE, {
+          title: "Add note",
+          kind: "warning",
+        });
+        return;
+      }
       const newNode = await addNode(parentId, formatDefaultNodeTitle());
       if (newNode) {
         setOpenItems((prevOpen) => {
@@ -1494,7 +1545,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         const initialFlatItems = convertToFlatData(treeData, null, initialOpen);
         setItems(initialFlatItems);
       }
-    }, []);
+    }, [items]);
 
     // --- EXPOSE METHODS VIA REF ---
     useImperativeHandle(

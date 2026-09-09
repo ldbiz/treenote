@@ -27,10 +27,11 @@ Use the **Tauri Development Debug** launch configuration in `.vscode/launch.json
 ## Project layout
 
 - `src/` — React frontend
+- `src/lib/treeDepth.ts` — shared 20-level nesting cap (`MAX_TREE_LEVEL`)
 - `src-tauri/` — Rust backend
 - `src-tauri/src/main.rs` — backend entry point
 - `src-tauri/src/tree.rs` — tree data structures
-- `src-tauri/src/storage.rs` — database operations
+- `src-tauri/src/storage.rs` — database operations, including the 20-level nesting cap on add/move
 - `installer/` — Inno Setup script for the Windows installer
 - `scripts/build_installer.ps1` — builds the app and packages the installer
 
