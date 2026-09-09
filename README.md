@@ -1,4 +1,4 @@
-# TreeNote - Alpha (still testing)
+# TreeNote - Alpha (still testing; risk of data loss)
 
 A minimalist plain-text note-taking app with your notes organised in a tree.
 
