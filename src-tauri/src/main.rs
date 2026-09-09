@@ -1,7 +1,9 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod atomic_file;
 mod backup;
+mod backup_meta;
 mod convert;
 mod data_root;
 mod dev_mode;
@@ -14,9 +16,42 @@ use std::path::{Path, PathBuf};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager,
+    AppHandle, Emitter, Manager,
 };
 use tree::TreeNode;
+
+#[derive(Clone, serde::Serialize)]
+struct BackupProgressPayload {
+    request_id: String,
+    phase: String,
+    done: u32,
+    total: u32,
+}
+
+fn emit_backup_progress(app: &AppHandle, request_id: &str, phase: &str, done: u32, total: u32) {
+    let _ = app.emit(
+        "backup-progress",
+        BackupProgressPayload {
+            request_id: request_id.to_string(),
+            phase: phase.to_string(),
+            done,
+            total,
+        },
+    );
+}
+
+fn snapshot_progress_for(app: AppHandle, request_id: String) -> storage::SnapshotProgressReporter {
+    Box::new(move |done, remaining| {
+        let total = done.saturating_add(remaining);
+        emit_backup_progress(&app, &request_id, "snapshot", done, total);
+    })
+}
+
+fn phase_reporter_for(app: AppHandle, request_id: String) -> storage::BackupPhaseReporter {
+    Box::new(move |phase| {
+        emit_backup_progress(&app, &request_id, phase, 0, 0);
+    })
+}
 
 #[tauri::command]
 fn get_tree() -> Result<Vec<TreeNode>, String> {
@@ -67,8 +102,13 @@ fn update_settings(
     app: tauri::AppHandle,
     editor_font_family: String,
     minimize_to_tray: bool,
+    backup_before_restore: bool,
 ) -> Result<storage::PublicSettings, String> {
-    let settings = storage::update_settings(editor_font_family, minimize_to_tray)?;
+    let settings = storage::update_settings(
+        editor_font_family,
+        minimize_to_tray,
+        backup_before_restore,
+    )?;
     apply_minimize_to_tray_mode(&app, minimize_to_tray);
     Ok(settings)
 }
@@ -158,20 +198,39 @@ fn import_joplin(
     convert::joplin::import_joplin(Path::new(&source_path), &dest, &current)
 }
 #[tauri::command]
-fn run_backup_now() -> Result<String, String> {
-    storage::run_backup_now()
+fn run_backup_now(
+    app: AppHandle,
+    label: Option<String>,
+    locked: Option<bool>,
+    progress_id: Option<String>,
+) -> Result<storage::RunBackupNowResult, String> {
+    let progress = progress_id.map(|id| snapshot_progress_for(app.clone(), id));
+    storage::run_backup_now(label, locked.unwrap_or(false), progress)
 }
 #[tauri::command]
-fn run_scheduled_backup_if_due() -> Result<Option<String>, String> {
+fn run_scheduled_backup_if_due() -> Result<Option<storage::RunBackupNowResult>, String> {
     storage::run_scheduled_backup_if_due()
 }
 #[tauri::command]
-fn list_managed_backups() -> Result<Vec<storage::ManagedBackupEntry>, String> {
+fn list_managed_backups() -> Result<storage::ManagedBackupList, String> {
     storage::list_managed_backups()
 }
 #[tauri::command]
-fn restore_notebook_from_backup(timestamp: u64) -> Result<(), String> {
-    storage::restore_notebook_from_backup(timestamp)
+fn set_backup_lock(timestamp: u64, locked: bool) -> Result<storage::ManagedBackupList, String> {
+    storage::set_backup_lock(timestamp, locked)
+}
+#[tauri::command]
+fn restore_notebook_from_backup(
+    app: AppHandle,
+    timestamp: u64,
+    create_backup_first: Option<bool>,
+    progress_id: Option<String>,
+) -> Result<(), String> {
+    let snapshot = progress_id
+        .as_ref()
+        .map(|id| snapshot_progress_for(app.clone(), id.clone()));
+    let phase = progress_id.map(|id| phase_reporter_for(app, id));
+    storage::restore_notebook_from_backup(timestamp, create_backup_first, snapshot, phase)
 }
 #[tauri::command]
 fn security_status() -> Result<storage::SecurityStatus, String> {
@@ -416,6 +475,7 @@ fn main() {
             run_backup_now,
             run_scheduled_backup_if_due,
             list_managed_backups,
+            set_backup_lock,
             restore_notebook_from_backup,
             security_status,
             verify_password,

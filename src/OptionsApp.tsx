@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useState } from "react";
-import { FluentProvider, webDarkTheme, webLightTheme } from "@fluentui/react-components";
+import { FluentProvider, ProgressBar, webDarkTheme, webLightTheme } from "@fluentui/react-components";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { AutoTheme, Moon, Sun } from "./components/icons";
 import { useTheme, type ThemePreference } from "./hooks/useTheme";
 import { useEditorFont, type EditorFontFamily } from "./hooks/useEditorFont";
@@ -12,8 +13,15 @@ import {
 } from "./lib/editorFonts";
 import { useUiZoom } from "./hooks/useUiZoom";
 import RestoreBackupDialog from "./components/RestoreBackupDialog";
+import CreateBackupDialog from "./components/CreateBackupDialog";
 import NotebookNameDialog from "./components/NotebookNameDialog";
-import { confirmRestore, confirmOpenNotebook, defaultFlashnoteExportPath, defaultTreenoteJsonExportPath, formatBackupLabel, pickFlashnoteDatabase, pickFlashnoteSavePath, pickJoplinExportFolder, pickJsonExportPath, pickObsidianVaultFolder, pickTreenoteJsonFile, suggestedNotebookStem } from "./lib/dialogs";
+import { confirmRestore, confirmOpenNotebook, defaultFlashnoteExportPath, defaultTreenoteJsonExportPath, pickFlashnoteDatabase, pickFlashnoteSavePath, pickJoplinExportFolder, pickJsonExportPath, pickObsidianVaultFolder, pickTreenoteJsonFile, suggestedNotebookStem } from "./lib/dialogs";
+import {
+  backupDisplayLabel,
+  formatBackupLabel,
+  type ManagedBackupEntry,
+  type ManagedBackupList,
+} from "./lib/backupList";
 import {
   createFlushRequestId,
   waitForFlushResult,
@@ -41,6 +49,7 @@ type AppSettings = {
   export_folder: string;
   editor_font_family: string;
   minimize_to_tray: boolean;
+  backup_before_restore: boolean;
 };
 
 type MessageKind = "success" | "error" | "info";
@@ -53,9 +62,21 @@ function notebookFileName(path: string): string {
   return slash >= 0 ? normalized.slice(slash + 1) : normalized;
 }
 
-type ManagedBackupEntry = {
-  timestamp: number;
+type ManagedBackupEntryLocal = ManagedBackupEntry;
+
+type RunBackupNowResult = {
+  path: string;
+  metadata_saved: boolean;
+  metadata_warning?: string | null;
 };
+
+type BackupProgressState = {
+  requestId: string;
+  phase: "snapshot" | "restore" | "finished";
+  done: number;
+  total: number;
+  caption: string;
+} | null;
 
 type ImportSummary = {
   notes_imported: number;
@@ -139,9 +160,12 @@ function OptionsApp() {
   const [hasPassword, setHasPassword] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [managedBackups, setManagedBackups] = useState<ManagedBackupEntry[]>([]);
+  const [managedBackups, setManagedBackups] = useState<ManagedBackupEntryLocal[]>([]);
+  const [metadataWarning, setMetadataWarning] = useState<string | null>(null);
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
+  const [createBackupDialogOpen, setCreateBackupDialogOpen] = useState(false);
   const [dialogSelectedTimestamp, setDialogSelectedTimestamp] = useState<number | null>(null);
+  const [backupProgress, setBackupProgress] = useState<BackupProgressState>(null);
   const [notebookCounts, setNotebookCounts] = useState<NotebookCounts | null>(null);
 
   const isBusy = (action: string) => busyAction === action;
@@ -168,10 +192,14 @@ function OptionsApp() {
     }
   };
 
-  const loadBackups = async (): Promise<ManagedBackupEntry[]> => {
-    const backups = await invoke<ManagedBackupEntry[]>("list_managed_backups");
-    setManagedBackups(backups);
-    return backups;
+  const loadBackups = async (): Promise<ManagedBackupEntryLocal[]> => {
+    const list = await invoke<ManagedBackupList>("list_managed_backups");
+    setManagedBackups(list.entries);
+    setMetadataWarning(list.metadata_warning ?? null);
+    if (list.metadata_warning) {
+      showSectionMessage("backups", "error", list.metadata_warning);
+    }
+    return list.entries;
   };
 
   const loadNotebookCounts = async (): Promise<NotebookCounts> => {
@@ -209,6 +237,37 @@ function OptionsApp() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    void listen<{
+      request_id: string;
+      phase: string;
+      done: number;
+      total: number;
+    }>("backup-progress", (event) => {
+      if (cancelled) return;
+      const { request_id, phase, done, total } = event.payload;
+      if (phase === "finished") {
+        setBackupProgress(null);
+        return;
+      }
+      const caption =
+        phase === "snapshot"
+          ? "Saving backup snapshot…"
+          : "Restoring notebook…";
+      setBackupProgress({
+        requestId: request_id,
+        phase: phase as "snapshot" | "restore",
+        done,
+        total,
+        caption,
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const onStorage = (event: StorageEvent) => {
       if (event.key === "treenote-db-switch-result" && event.newValue) {
         try {
@@ -240,16 +299,20 @@ function OptionsApp() {
             ok?: boolean;
             timestamp?: number;
             error?: string;
+            createBackupFirst?: boolean;
           };
           if (result.ok) {
             const label =
               typeof result.timestamp === "number"
                 ? formatBackupLabel(result.timestamp)
                 : "the selected backup";
+            const safetyNote = result.createBackupFirst === false
+              ? ""
+              : " Your previous version was saved as a backup.";
             showSectionMessage(
               "backups",
               "success",
-              `Notebook restored to ${label}. Your previous version was saved as a backup.`,
+              `Notebook restored to ${label}.${safetyNote}`,
             );
             void load().catch((error) =>
               showSectionMessage(
@@ -370,6 +433,7 @@ function OptionsApp() {
       const saved = await invoke<AppSettings>("update_settings", {
         editorFontFamily: family,
         minimizeToTray: settings.minimize_to_tray,
+        backupBeforeRestore: settings.backup_before_restore,
       });
       setSettings(saved);
     } catch (error) {
@@ -384,6 +448,7 @@ function OptionsApp() {
       const saved = await invoke<AppSettings>("update_settings", {
         editorFontFamily: settings.editor_font_family,
         minimizeToTray: enabled,
+        backupBeforeRestore: settings.backup_before_restore,
       });
       setSettings(saved);
     } catch (error) {
@@ -506,16 +571,47 @@ function OptionsApp() {
     );
   };
 
-  const backupNow = async () => {
+  const persistBackupBeforeRestore = async (enabled: boolean) => {
     if (!settings) return;
     clearSectionMessage("backups");
+    try {
+      const saved = await invoke<AppSettings>("update_settings", {
+        editorFontFamily: settings.editor_font_family,
+        minimizeToTray: settings.minimize_to_tray,
+        backupBeforeRestore: enabled,
+      });
+      setSettings(saved);
+    } catch (error) {
+      showSectionMessage("backups", "error", `Failed to save setting: ${errorText(error)}`);
+    }
+  };
+
+  const backupNow = () => {
+    if (!settings) return;
+    clearSectionMessage("backups");
+    setCreateBackupDialogOpen(true);
+  };
+
+  const confirmCreateBackup = async (label: string, locked: boolean) => {
+    if (!settings) return;
     await runAction("backupNow", async () => {
       try {
         const requestId = createFlushRequestId();
         writeFlushRequest(requestId);
         await waitForFlushResult(requestId);
-        const path = await invoke<string>("run_backup_now");
-        showSectionMessage("backups", "success", `Backup created: ${path}.`);
+        const progressId = createFlushRequestId();
+        const trimmed = label.trim();
+        const result = await invoke<RunBackupNowResult>("run_backup_now", {
+          label: trimmed.length > 0 ? trimmed : null,
+          locked,
+          progressId,
+        });
+        setCreateBackupDialogOpen(false);
+        let message = `Backup created: ${result.path}.`;
+        if (result.metadata_warning) {
+          message += ` ${result.metadata_warning}`;
+        }
+        showSectionMessage("backups", result.metadata_saved ? "success" : "info", message);
         await loadBackups();
       } catch (error) {
         showSectionMessage(
@@ -525,6 +621,8 @@ function OptionsApp() {
             ? "Couldn't save the current note."
             : `Backup failed: ${errorText(error)}`,
         );
+      } finally {
+        setBackupProgress(null);
       }
     });
   };
@@ -547,16 +645,29 @@ function OptionsApp() {
   const confirmRestoreSelection = async () => {
     if (!settings || dialogSelectedTimestamp === null) return;
     clearSectionMessage("backups");
-    const label = formatBackupLabel(dialogSelectedTimestamp);
-    const confirmed = await confirmRestore(
-      `Restore this notebook to ${label}?\n\nTreeNote will first save a backup of the current version.`,
+    const label = backupDisplayLabel(
+      managedBackups.find((entry) => entry.timestamp === dialogSelectedTimestamp) ?? {
+        timestamp: dialogSelectedTimestamp,
+        label: null,
+        locked: false,
+      },
     );
+    const backupNote = settings.backup_before_restore
+      ? "\n\nTreeNote will first save a backup of the current version."
+      : "\n\nThe current notebook will be replaced without creating a backup first.";
+    const confirmed = await confirmRestore(`Restore this notebook to ${label}?${backupNote}`);
     if (!confirmed) return;
     await runAction("restoreBackup", async () => {
       try {
+        const progressId = createFlushRequestId();
         localStorage.setItem(
           "treenote-backup-restore-request",
-          JSON.stringify({ timestamp: dialogSelectedTimestamp, at: Date.now() }),
+          JSON.stringify({
+            timestamp: dialogSelectedTimestamp,
+            createBackupFirst: settings.backup_before_restore,
+            progressId,
+            at: Date.now(),
+          }),
         );
         closeRestoreDialog();
         showSectionMessage(
@@ -568,6 +679,20 @@ function OptionsApp() {
         showSectionMessage("backups", "error", `Failed to request restore: ${errorText(error)}`);
       }
     });
+  };
+
+  const handleKeepSelectedChange = async (locked: boolean) => {
+    if (dialogSelectedTimestamp === null) return;
+    try {
+      const list = await invoke<ManagedBackupList>("set_backup_lock", {
+        timestamp: dialogSelectedTimestamp,
+        locked,
+      });
+      setManagedBackups(list.entries);
+      setMetadataWarning(list.metadata_warning ?? null);
+    } catch (error) {
+      showSectionMessage("backups", "error", `Failed to update backup lock: ${errorText(error)}`);
+    }
   };
 
   const savePassword = async () => {
@@ -825,21 +950,54 @@ function OptionsApp() {
             <button
               type="button"
               className="options-btn options-btn-secondary"
-              onClick={openRestoreDialog}
+              onClick={() => void openRestoreDialog()}
               disabled={isAnyBusy || loading || managedBackups.length === 0}
             >
               {isBusy("restoreBackup") ? "Restoring…" : "Restore from backup…"}
             </button>
           </div>
+
+          {backupProgress ? (
+            <div className="backup-progress-block" role="status" aria-live="polite">
+              <p className="backup-progress-caption">{backupProgress.caption}</p>
+              <ProgressBar
+                value={
+                  backupProgress.phase === "snapshot" && backupProgress.total > 0
+                    ? backupProgress.done / backupProgress.total
+                    : undefined
+                }
+                thickness="medium"
+              />
+            </div>
+          ) : null}
+
+          {metadataWarning && !sectionMessages.backups?.text ? (
+            <SectionStatus kind="error">{metadataWarning}</SectionStatus>
+          ) : null}
         </OptionsSection>
+
+        <CreateBackupDialog
+          open={createBackupDialogOpen}
+          busy={isBusy("backupNow")}
+          onConfirm={(label, locked) => void confirmCreateBackup(label, locked)}
+          onCancel={() => setCreateBackupDialogOpen(false)}
+        />
 
         <RestoreBackupDialog
           open={restoreDialogOpen}
           backups={managedBackups}
           selectedTimestamp={dialogSelectedTimestamp}
+          backupBeforeRestore={settings?.backup_before_restore ?? true}
           busy={isBusy("restoreBackup")}
           onSelect={setDialogSelectedTimestamp}
           onClearSelection={() => setDialogSelectedTimestamp(null)}
+          onBackupBeforeRestoreChange={(enabled) => {
+            setSettings((current) =>
+              current ? { ...current, backup_before_restore: enabled } : current,
+            );
+            void persistBackupBeforeRestore(enabled);
+          }}
+          onKeepSelectedChange={(locked) => void handleKeepSelectedChange(locked)}
           onRestore={() => void confirmRestoreSelection()}
           onCancel={closeRestoreDialog}
         />
