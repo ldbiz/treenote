@@ -305,9 +305,23 @@ pub fn set_enabled(enabled: bool) -> Result<RunOnStartupStatus, String> {
     imp::set_enabled_with(&imp::PRODUCTION, enabled)
 }
 
+fn should_repair_startup_path() -> bool {
+    // Debug/`tauri dev` use a different current_exe() than the installed app.
+    // Rewriting HKCU Run from those builds would replace a production entry.
+    !cfg!(debug_assertions) && !crate::dev_mode::is_dev_mode()
+}
+
+#[cfg(windows)]
+fn repair_path_if_present_for(targets: &imp::RegistryTargets) {
+    if !should_repair_startup_path() {
+        return;
+    }
+    imp::repair_path_if_present_with(targets);
+}
+
 #[cfg(windows)]
 pub fn repair_path_if_present() {
-    imp::repair_path_if_present_with(&imp::PRODUCTION);
+    repair_path_if_present_for(&imp::PRODUCTION);
 }
 
 #[cfg(not(windows))]
@@ -340,6 +354,14 @@ mod tests {
             assert!(!status.enabled);
             assert!(set_enabled(true).is_err());
         }
+    }
+
+    #[test]
+    fn debug_and_dev_builds_skip_startup_path_repair() {
+        assert!(
+            !should_repair_startup_path(),
+            "debug and TREENOTE_DEV_MODE builds must not rewrite HKCU Run"
+        );
     }
 
     #[cfg(windows)]
@@ -423,6 +445,26 @@ mod tests {
                     .expect("read")
                     .expect("present");
                 assert_ne!(current, stale);
+                cleanup(&TEST_TARGETS);
+            });
+        }
+
+        #[test]
+        fn gated_repair_does_not_rewrite_in_debug_or_dev_builds() {
+            with_registry_lock(|| {
+                cleanup(&TEST_TARGETS);
+                set_enabled_with(&TEST_TARGETS, true).expect("enable");
+                let stale = r#""C:\Old\TreeNote.exe""#;
+                imp_set_stale(&TEST_TARGETS, stale);
+                super::super::repair_path_if_present_for(&TEST_TARGETS);
+                let current = read_string_value(TEST_TARGETS.run_subkey, TEST_TARGETS.value_name)
+                    .expect("read")
+                    .expect("present");
+                if super::super::should_repair_startup_path() {
+                    assert_ne!(current, stale);
+                } else {
+                    assert_eq!(current, stale);
+                }
                 cleanup(&TEST_TARGETS);
             });
         }
