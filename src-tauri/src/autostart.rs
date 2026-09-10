@@ -164,7 +164,7 @@ mod imp {
         let handle = create_or_open_key(subkey)?;
         let value_name_wide = to_wide(value_name);
         let data_wide = to_wide(data);
-        let byte_len = ((data_wide.len() - 1) * 2) as u32;
+        let byte_len = (data_wide.len() * std::mem::size_of::<u16>()) as u32;
         let status = unsafe {
             RegSetValueExW(
                 handle,
@@ -180,6 +180,48 @@ mod imp {
             return Err(format!("Could not write registry value (error {status})."));
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn read_raw_value(subkey: &str, value_name: &str) -> Result<(u32, Vec<u8>), String> {
+        let handle = match open_key(subkey, KEY_QUERY_VALUE) {
+            Ok(handle) => handle,
+            Err(message) => return Err(message),
+        };
+        let value_name_wide = to_wide(value_name);
+        let mut kind: u32 = 0;
+        let mut size: u32 = 0;
+        let query = unsafe {
+            RegQueryValueExW(
+                handle,
+                value_name_wide.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        if query != ERROR_SUCCESS {
+            unsafe { RegCloseKey(handle) };
+            return Err(format!("Could not read registry value (error {query})."));
+        }
+        let mut buffer = vec![0u8; size as usize];
+        let status = unsafe {
+            RegQueryValueExW(
+                handle,
+                value_name_wide.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                buffer.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        unsafe { RegCloseKey(handle) };
+        if status != ERROR_SUCCESS {
+            return Err(format!("Could not read registry value (error {status})."));
+        }
+        buffer.truncate(size as usize);
+        Ok((kind, buffer))
     }
 
     pub fn delete_value(subkey: &str, value_name: &str) -> Result<(), String> {
@@ -303,10 +345,12 @@ mod tests {
     #[cfg(windows)]
     mod windows_tests {
         use super::super::imp::{
-            delete_value, read_string_value, repair_path_if_present_with, set_enabled_with,
-            status_with, value_exists, RegistryTargets,
+            delete_value, read_raw_value, read_string_value, repair_path_if_present_with,
+            set_enabled_with, status_with, value_exists, RegistryTargets,
         };
+        use std::os::windows::ffi::OsStrExt;
         use std::sync::{Mutex, OnceLock};
+        use windows_sys::Win32::System::Registry::REG_SZ;
 
         fn test_lock() -> &'static Mutex<()> {
             static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -406,6 +450,35 @@ mod tests {
                 cleanup(&TEST_TARGETS);
                 let status = set_enabled_with(&TEST_TARGETS, true).expect("enable");
                 assert!(status.enabled);
+                cleanup(&TEST_TARGETS);
+            });
+        }
+
+        #[test]
+        fn enable_writes_nul_terminated_reg_sz() {
+            with_registry_lock(|| {
+                cleanup(&TEST_TARGETS);
+                set_enabled_with(&TEST_TARGETS, true).expect("enable");
+                let (kind, bytes) =
+                    read_raw_value(TEST_TARGETS.run_subkey, TEST_TARGETS.value_name)
+                        .expect("raw read");
+                assert_eq!(kind, REG_SZ);
+
+                let expected = format!(
+                    "\"{}\"",
+                    std::env::current_exe().expect("current_exe").display()
+                );
+                let expected_wide: Vec<u16> = std::ffi::OsStr::new(&expected)
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let expected_bytes: Vec<u8> = expected_wide
+                    .iter()
+                    .flat_map(|unit| unit.to_le_bytes())
+                    .collect();
+                assert_eq!(bytes.len(), expected_bytes.len());
+                assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]);
+                assert_eq!(bytes, expected_bytes);
                 cleanup(&TEST_TARGETS);
             });
         }
