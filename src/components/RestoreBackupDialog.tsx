@@ -7,15 +7,23 @@ import {
   DialogSurface,
   DialogTitle,
 } from "@fluentui/react-components";
-import { filterBackupGroups, groupBackupListItems } from "../lib/dialogs";
+import {
+  backupDisplayLabel,
+  filterBackupGroups,
+  groupBackupListItems,
+  type ManagedBackupEntry,
+} from "../lib/backupList";
 
 interface RestoreBackupDialogProps {
   open: boolean;
-  backups: { timestamp: number }[];
+  backups: ManagedBackupEntry[];
   selectedTimestamp: number | null;
+  backupBeforeRestore: boolean;
   busy?: boolean;
   onSelect: (timestamp: number) => void;
   onClearSelection: () => void;
+  onBackupBeforeRestoreChange: (enabled: boolean) => void;
+  onKeepSelectedChange: (locked: boolean) => void;
   onRestore: () => void;
   onCancel: () => void;
 }
@@ -24,9 +32,12 @@ export default function RestoreBackupDialog({
   open,
   backups,
   selectedTimestamp,
+  backupBeforeRestore,
   busy = false,
   onSelect,
   onClearSelection,
+  onBackupBeforeRestoreChange,
+  onKeepSelectedChange,
   onRestore,
   onCancel,
 }: RestoreBackupDialogProps) {
@@ -35,12 +46,16 @@ export default function RestoreBackupDialog({
 
   const groups = useMemo(() => groupBackupListItems(backups), [backups]);
   const filteredGroups = useMemo(
-    () => filterBackupGroups(groups, filterQuery),
-    [groups, filterQuery],
+    () => filterBackupGroups(groups, backups, filterQuery),
+    [groups, backups, filterQuery],
   );
   const isFiltering = filterQuery.trim().length > 0;
   const olderGroup = groups.find((group) => group.id === "older");
   const olderCount = olderGroup?.items.length ?? 0;
+  const selectedEntry =
+    selectedTimestamp === null
+      ? null
+      : backups.find((entry) => entry.timestamp === selectedTimestamp) ?? null;
 
   useEffect(() => {
     if (!open) return;
@@ -82,11 +97,11 @@ export default function RestoreBackupDialog({
                 className="options-control"
                 value={filterQuery}
                 disabled={busy}
-                placeholder="Filter by date or time"
+                placeholder="Filter by date, time or label"
                 onChange={(event) => setFilterQuery(event.target.value)}
               />
               <p className="options-field-hint">
-                Try a month, date or time, e.g. Aug or 10:30.
+                Try a month, date, time or label, e.g. Aug or Before release.
               </p>
             </label>
             <div
@@ -132,6 +147,14 @@ export default function RestoreBackupDialog({
                       <ul className="restore-backup-group-items">
                         {group.items.map((item) => {
                           const selected = selectedTimestamp === item.timestamp;
+                          const entry =
+                            backups.find((backup) => backup.timestamp === item.timestamp) ??
+                            item;
+                          const displayLabel = backupDisplayLabel({
+                            timestamp: item.timestamp,
+                            label: item.userLabel ?? null,
+                            locked: item.locked,
+                          });
                           return (
                             <li key={item.timestamp}>
                               <label
@@ -144,7 +167,12 @@ export default function RestoreBackupDialog({
                                   disabled={busy}
                                   onChange={() => onSelect(item.timestamp)}
                                 />
-                                <span>{item.label}</span>
+                                <span className="restore-backup-option-label">
+                                  <span>{displayLabel}</span>
+                                  {entry.locked ? (
+                                    <span className="restore-backup-kept-tag">Kept</span>
+                                  ) : null}
+                                </span>
                               </label>
                             </li>
                           );
@@ -156,23 +184,51 @@ export default function RestoreBackupDialog({
               )}
             </div>
           </DialogContent>
-          <DialogActions className="app-dialog-actions">
-            <button
-              type="button"
-              className="app-dialog-button"
-              disabled={busy}
-              onClick={onCancel}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="app-dialog-button app-dialog-danger"
-              disabled={busy || selectedTimestamp === null}
-              onClick={onRestore}
-            >
-              {busy ? "Restoring…" : "Restore"}
-            </button>
+          <DialogActions className="app-dialog-actions restore-backup-dialog-actions">
+            <div className="restore-backup-dialog-options">
+              <label className="options-field options-checkbox-field restore-backup-dialog-checkbox">
+                <input
+                  type="checkbox"
+                  className="options-checkbox"
+                  checked={backupBeforeRestore}
+                  disabled={busy}
+                  onChange={(event) => onBackupBeforeRestoreChange(event.target.checked)}
+                />
+                <span className="options-checkbox-label">
+                  Create a backup of the current notebook first
+                </span>
+              </label>
+              {selectedEntry ? (
+                <label className="options-field options-checkbox-field restore-backup-dialog-checkbox">
+                  <input
+                    type="checkbox"
+                    className="options-checkbox"
+                    checked={selectedEntry.locked}
+                    disabled={busy}
+                    onChange={(event) => onKeepSelectedChange(event.target.checked)}
+                  />
+                  <span className="options-checkbox-label">Keep selected backup</span>
+                </label>
+              ) : null}
+            </div>
+            <div className="restore-backup-dialog-buttons">
+              <button
+                type="button"
+                className="app-dialog-button"
+                disabled={busy}
+                onClick={onCancel}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="app-dialog-button app-dialog-danger"
+                disabled={busy || selectedTimestamp === null}
+                onClick={onRestore}
+              >
+                {busy ? "Restoring…" : "Restore"}
+              </button>
+            </div>
           </DialogActions>
         </DialogBody>
       </DialogSurface>

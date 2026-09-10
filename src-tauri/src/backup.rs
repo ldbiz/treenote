@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::backup_meta::LockState;
+
 pub const MANAGED_ROOT: &str = "TreeNote Backups";
 pub const BACKUP_INTERVAL_SECS: u64 = 600;
 
@@ -280,12 +282,35 @@ pub fn is_backup_due(dir: &Path, now: u64) -> Result<bool, String> {
     }
 }
 
-pub fn prune_managed_backups(dir: &Path, now: u64) -> Result<(), String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PruneOutcome {
+    Pruned,
+    Suspended { reason: String },
+}
+
+pub fn prune_managed_backups(
+    dir: &Path,
+    now: u64,
+    lock_state: LockState,
+) -> Result<PruneOutcome, String> {
     if !dir.exists() {
-        return Ok(());
+        return Ok(PruneOutcome::Pruned);
     }
+    if matches!(lock_state, LockState::Unavailable) {
+        return Ok(PruneOutcome::Suspended {
+            reason: "backup metadata is unreadable".into(),
+        });
+    }
+    let LockState::Known(locked) = lock_state else {
+        return Ok(PruneOutcome::Suspended {
+            reason: "backup metadata is unreadable".into(),
+        });
+    };
     let timestamps = list_managed_backup_timestamps(dir)?;
-    let keep = backups_to_keep(&timestamps, now);
+    let mut keep = backups_to_keep(&timestamps, now);
+    for ts in locked {
+        keep.insert(ts);
+    }
     for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let file_type = entry.file_type().map_err(|e| e.to_string())?;
@@ -303,7 +328,7 @@ pub fn prune_managed_backups(dir: &Path, now: u64) -> Result<(), String> {
             let _ = fs::remove_file(entry.path());
         }
     }
-    Ok(())
+    Ok(PruneOutcome::Pruned)
 }
 
 pub fn now_secs() -> u64 {
@@ -516,7 +541,7 @@ mod tests {
         let legacy = dir.join("treenote-backup-1700000000.sqlite3");
         fs::write(&legacy, "legacy").expect("write legacy");
 
-        prune_managed_backups(&dir, now).expect("prune");
+        prune_managed_backups(&dir, now, LockState::Known(HashSet::new())).expect("prune");
 
         assert!(junk.exists());
         assert!(legacy.exists());
@@ -543,7 +568,7 @@ mod tests {
             write_backup(&dir_a, now - i * HOUR);
             write_backup(&dir_b, now - i * HOUR);
         }
-        prune_managed_backups(&dir_a, now).expect("prune a");
+        prune_managed_backups(&dir_a, now, LockState::Known(HashSet::new())).expect("prune a");
         let count_a = fs::read_dir(&dir_a)
             .unwrap()
             .filter(|e| {
@@ -576,6 +601,117 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         write_backup(&dir, now - BACKUP_INTERVAL_SECS - 1);
         assert!(is_backup_due(&dir, now).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locked_backup_survives_prune_outside_gfs_slots() {
+        let dir = temp_dir();
+        let now = 1_700_000_000u64;
+        let old = now - 30 * DAY;
+        let recent = now - HOUR;
+        write_backup(&dir, old);
+        write_backup(&dir, recent);
+        let mut locked = HashSet::new();
+        locked.insert(old);
+        prune_managed_backups(&dir, now, LockState::Known(locked)).expect("prune");
+        assert!(dir.join(backup_filename_for_timestamp(old)).exists());
+        assert!(dir.join(backup_filename_for_timestamp(recent)).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unavailable_lock_state_suspends_pruning() {
+        let dir = temp_dir();
+        let now = 1_700_000_000u64;
+        for i in 0..30 {
+            write_backup(&dir, now - i * HOUR);
+        }
+        let before = fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| is_managed_backup_filename(&e.file_name().to_string_lossy()))
+                    .unwrap_or(false)
+            })
+            .count();
+        let outcome =
+            prune_managed_backups(&dir, now, LockState::Unavailable).expect("prune call");
+        assert!(matches!(outcome, PruneOutcome::Suspended { .. }));
+        let after = fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| is_managed_backup_filename(&e.file_name().to_string_lossy()))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(before, after);
+        assert_eq!(before, 30);
+        let junk = dir.join("notes.txt");
+        fs::write(&junk, "keep me").expect("write junk");
+        let outcome2 =
+            prune_managed_backups(&dir, now, LockState::Unavailable).expect("prune call");
+        assert!(matches!(outcome2, PruneOutcome::Suspended { .. }));
+        assert!(junk.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn known_empty_lock_state_prunes_normally() {
+        let dir = temp_dir();
+        let now = 1_700_000_000u64;
+        for i in 0..30 {
+            write_backup(&dir, now - i * HOUR);
+        }
+        let outcome =
+            prune_managed_backups(&dir, now, LockState::Known(HashSet::new())).expect("prune");
+        assert_eq!(outcome, PruneOutcome::Pruned);
+        let remaining = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| is_managed_backup_filename(&e.file_name().to_string_lossy()))
+            .count();
+        let keep = backups_to_keep(&(0..30).map(|i| now - i * HOUR).collect::<Vec<_>>(), now);
+        assert_eq!(remaining, keep.len());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_metadata_timestamp_key_suspends_pruning() {
+        let dir = temp_dir();
+        let now = 1_700_000_000u64;
+        for i in 0..30 {
+            write_backup(&dir, now - i * HOUR);
+        }
+        fs::write(
+            dir.join(crate::backup_meta::METADATA_FILENAME),
+            r#"{"not-a-timestamp":{"locked":true}}"#,
+        )
+        .expect("write metadata");
+        let before = fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| is_managed_backup_filename(&e.file_name().to_string_lossy()))
+                    .unwrap_or(false)
+            })
+            .count();
+        let lock_state =
+            crate::backup_meta::lock_state_from_read(crate::backup_meta::read_index(&dir));
+        assert_eq!(lock_state, LockState::Unavailable);
+        let outcome = prune_managed_backups(&dir, now, lock_state).expect("prune call");
+        assert!(matches!(outcome, PruneOutcome::Suspended { .. }));
+        let after = fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| is_managed_backup_filename(&e.file_name().to_string_lossy()))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(before, after);
+        assert_eq!(before, 30);
         let _ = fs::remove_dir_all(&dir);
     }
 

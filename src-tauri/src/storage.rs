@@ -3,20 +3,26 @@ use argon2::{
     Argon2,
 };
 use once_cell::sync::{Lazy, OnceCell};
-use rusqlite::backup::Backup;
+use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::thread;
 use std::time::Duration;
 use uuid::Uuid;
 
 use crate::backup::{
     backup_filename_for_timestamp, backup_snapshot_temp_filename, is_backup_due,
     list_managed_backup_timestamps, managed_notebook_dir, now_secs as backup_now_secs,
-    prune_managed_backups,
+    prune_managed_backups, PruneOutcome,
 };
+use crate::backup_meta::{
+    self, forget_missing, meta_for_timestamp, metadata_warning, read_index, set_entry, set_lock,
+    IndexReadResult,
+};
+use crate::atomic_file;
 use crate::data_root::{self, DEFAULT_NOTEBOOK_FILENAME};
 use crate::managed_notebook;
 use crate::notebook_lock::{self, NotebookLock};
@@ -57,6 +63,8 @@ pub struct AppSettings {
     pub editor_font_family: String,
     #[serde(default = "default_minimize_to_tray")]
     pub minimize_to_tray: bool,
+    #[serde(default = "default_backup_before_restore")]
+    pub backup_before_restore: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -65,6 +73,7 @@ pub struct PublicSettings {
     pub export_folder: String,
     pub editor_font_family: String,
     pub minimize_to_tray: bool,
+    pub backup_before_restore: bool,
 }
 
 impl AppSettings {
@@ -77,6 +86,7 @@ impl AppSettings {
             password_hash: None,
             editor_font_family: "system".to_string(),
             minimize_to_tray: true,
+            backup_before_restore: true,
         }
     }
 }
@@ -87,6 +97,7 @@ fn public_settings_from(s: AppSettings) -> Result<PublicSettings, String> {
         export_folder: path_to_setting(&current_exports_dir()?),
         editor_font_family: s.editor_font_family,
         minimize_to_tray: s.minimize_to_tray,
+        backup_before_restore: s.backup_before_restore,
     })
 }
 
@@ -143,6 +154,10 @@ fn default_minimize_to_tray() -> bool {
     true
 }
 
+fn default_backup_before_restore() -> bool {
+    true
+}
+
 fn new_password_hash(password: &str) -> Result<String, String> {
     // App-lock only: this Argon2id PHC string gates UI access. The SQLite database file is not encrypted.
     let salt_bytes = Uuid::new_v4().into_bytes();
@@ -173,6 +188,7 @@ fn default_settings_on(data_root: &Path) -> AppSettings {
         password_hash: None,
         editor_font_family: "system".to_string(),
         minimize_to_tray: true,
+        backup_before_restore: true,
     }
 }
 
@@ -255,45 +271,11 @@ fn write_settings_json_atomically(path: &Path, json: &str) -> Result<(), String>
         Uuid::new_v4()
     ));
     fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    let result = atomic_replace_file(&tmp, path);
+    let result = atomic_file::atomic_replace_file(&tmp, path);
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     result
-}
-
-#[cfg(windows)]
-fn atomic_replace_file(tmp: &Path, dest: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x00000008;
-
-    fn to_wide(path: &Path) -> Vec<u16> {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-
-    let tmp_w = to_wide(tmp);
-    let dest_w = to_wide(dest);
-    let ok = unsafe {
-        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-            tmp_w.as_ptr(),
-            dest_w.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn atomic_replace_file(tmp: &Path, dest: &Path) -> Result<(), String> {
-    fs::rename(tmp, dest).map_err(|e| e.to_string())
 }
 
 fn save_settings_to_path(path: &Path, settings: &AppSettings) -> Result<(), String> {
@@ -747,10 +729,12 @@ pub fn get_settings() -> Result<PublicSettings, String> {
 pub fn update_settings(
     editor_font_family: String,
     minimize_to_tray: bool,
+    backup_before_restore: bool,
 ) -> Result<PublicSettings, String> {
     let mut s = SETTINGS.lock().map_err(|e| e.to_string())?;
     s.editor_font_family = editor_font_family;
     s.minimize_to_tray = minimize_to_tray;
+    s.backup_before_restore = backup_before_restore;
     save_settings_to_disk(&s)?;
     public_settings_from(s.clone())
 }
@@ -922,6 +906,237 @@ pub fn fetch_all_notes_flat() -> Result<Vec<NotebookNoteRow>, String> {
 #[derive(Debug, Serialize, Clone)]
 pub struct ManagedBackupEntry {
     pub timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub locked: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ManagedBackupList {
+    pub entries: Vec<ManagedBackupEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_warning: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct RunBackupNowResult {
+    pub path: String,
+    pub metadata_saved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_warning: Option<String>,
+}
+
+pub type SnapshotProgressReporter = Box<dyn Fn(u32, u32) + Send>;
+
+pub(crate) fn snapshot_progress_counts(pagecount: i32, remaining: i32) -> (u32, u32) {
+    let total = pagecount.max(0) as u32;
+    let done = total.saturating_sub(remaining.max(0) as u32);
+    (done, total)
+}
+
+fn run_backup_snapshot_with_progress(
+    dest: &Path,
+    progress: Option<SnapshotProgressReporter>,
+) -> Result<(), String> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| "Invalid backup path".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let tmp = parent.join(backup_snapshot_temp_filename());
+    let snapshot_result = (|| {
+        {
+            let src = db_connection()?;
+            let mut dest_conn = Connection::open(&tmp).map_err(|e| e.to_string())?;
+            let backup = Backup::new(&src, &mut dest_conn).map_err(|e| e.to_string())?;
+            let pages_per_step = 5;
+            let pause = Duration::from_millis(250);
+            loop {
+                match backup.step(pages_per_step).map_err(|e| e.to_string())? {
+                    StepResult::Done => {
+                        if let Some(ref report) = progress {
+                            let p = backup.progress();
+                            let (_, total) = snapshot_progress_counts(p.pagecount, p.remaining);
+                            report(total, total);
+                        }
+                        break;
+                    }
+                    StepResult::More => {
+                        if let Some(ref report) = progress {
+                            let p = backup.progress();
+                            let (done, total) =
+                                snapshot_progress_counts(p.pagecount, p.remaining);
+                            report(done, total);
+                        }
+                    }
+                    StepResult::Busy | StepResult::Locked => {
+                        thread::sleep(pause);
+                    }
+                    _ => {
+                        thread::sleep(pause);
+                    }
+                }
+            }
+        }
+        validate_sqlite_integrity(&tmp)?;
+        promote_backup_no_clobber(&tmp, dest)?;
+        Ok::<(), String>(())
+    })();
+    if snapshot_result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    snapshot_result
+}
+
+fn snapshot_live_notebook_to_path(dest: &Path) -> Result<(), String> {
+    run_backup_snapshot_with_progress(dest, None)
+}
+
+fn snapshot_live_notebook_to_path_with_progress(
+    dest: &Path,
+    progress: SnapshotProgressReporter,
+) -> Result<(), String> {
+    run_backup_snapshot_with_progress(dest, Some(progress))
+}
+
+fn existing_backup_timestamps(dir: &Path) -> Result<std::collections::HashSet<u64>, String> {
+    Ok(list_managed_backup_timestamps(dir)?.into_iter().collect())
+}
+
+fn finalize_backup_prune_and_metadata(
+    notebook_dir: &Path,
+    timestamp: u64,
+    label: Option<String>,
+    locked: bool,
+) -> Result<(RunBackupNowResult, Option<String>), String> {
+    let read = read_index(notebook_dir);
+    let metadata_warning = metadata_warning(read.clone());
+    let lock_state = backup_meta::lock_state_from_read(read.clone());
+    let prune_outcome = prune_managed_backups(notebook_dir, timestamp, lock_state)?;
+    if let PruneOutcome::Suspended { reason } = prune_outcome {
+        eprintln!("TreeNote backup pruning suspended: {reason}");
+    }
+    let existing = existing_backup_timestamps(notebook_dir)?;
+    let mut metadata_saved = true;
+    let mut metadata_warning_result = metadata_warning.clone();
+    if matches!(read, IndexReadResult::Ok(_)) {
+        if let Err(reason) = forget_missing(notebook_dir, &existing) {
+            metadata_saved = false;
+            metadata_warning_result = Some(format!(
+                "Backup was created, but backup metadata could not be updated: {reason}"
+            ));
+        }
+    }
+    let dest = notebook_dir.join(backup_filename_for_timestamp(timestamp));
+    if label.is_some() || locked {
+        if let Err(reason) = set_entry(notebook_dir, timestamp, label, locked) {
+            metadata_saved = false;
+            metadata_warning_result = Some(format!(
+                "Backup was created, but its label or lock could not be saved: {reason}"
+            ));
+        }
+    }
+    Ok((
+        RunBackupNowResult {
+            path: dest.to_string_lossy().to_string(),
+            metadata_saved,
+            metadata_warning: metadata_warning_result,
+        },
+        metadata_warning,
+    ))
+}
+
+fn create_managed_backup_without_prune(
+    settings: &AppSettings,
+    progress: Option<SnapshotProgressReporter>,
+) -> Result<(PathBuf, u64), String> {
+    let src = PathBuf::from(&settings.database_path);
+    if !src.exists() {
+        return Err("Active database does not exist yet".into());
+    }
+    let notebook_dir = {
+        let backup_root = current_backups_dir()?;
+        managed_notebook_dir(&path_to_setting(&backup_root), &settings.database_path)
+    };
+    fs::create_dir_all(&notebook_dir).map_err(|e| e.to_string())?;
+    let (dest, timestamp) = reserve_unique_backup_dest(&notebook_dir)?;
+    match progress {
+        Some(reporter) => snapshot_live_notebook_to_path_with_progress(&dest, reporter)?,
+        None => snapshot_live_notebook_to_path(&dest)?,
+    };
+    Ok((notebook_dir, timestamp))
+}
+
+pub fn run_backup_now(
+    label: Option<String>,
+    locked: bool,
+    progress: Option<SnapshotProgressReporter>,
+) -> Result<RunBackupNowResult, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    let trimmed_label = label.and_then(|value| {
+        let t = value.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    });
+    let (notebook_dir, timestamp) = create_managed_backup_without_prune(&s, progress)?;
+    let (result, _) = finalize_backup_prune_and_metadata(
+        &notebook_dir,
+        timestamp,
+        trimmed_label,
+        locked,
+    )?;
+    Ok(result)
+}
+
+pub fn run_scheduled_backup_if_due() -> Result<Option<RunBackupNowResult>, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    let backup_root = current_backups_dir()?;
+    let notebook_dir = managed_notebook_dir(&path_to_setting(&backup_root), &s.database_path);
+    let now = backup_now_secs();
+    if is_backup_due(&notebook_dir, now)? {
+        drop(s);
+        run_backup_now(None, false, None).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn list_managed_backups() -> Result<ManagedBackupList, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    let backup_root = current_backups_dir()?;
+    let notebook_dir = managed_notebook_dir(&path_to_setting(&backup_root), &s.database_path);
+    let read = read_index(&notebook_dir);
+    let warning = metadata_warning(read.clone());
+    let mut timestamps = list_managed_backup_timestamps(&notebook_dir)?;
+    timestamps.sort_by(|a, b| b.cmp(a));
+    Ok(ManagedBackupList {
+        entries: timestamps
+            .into_iter()
+            .map(|timestamp| {
+                let meta = meta_for_timestamp(&read, timestamp);
+                ManagedBackupEntry {
+                    timestamp,
+                    label: meta.label,
+                    locked: meta.locked,
+                }
+            })
+            .collect(),
+        metadata_warning: warning,
+    })
+}
+
+pub fn set_backup_lock(timestamp: u64, locked: bool) -> Result<ManagedBackupList, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    let backup_root = current_backups_dir()?;
+    let notebook_dir = managed_notebook_dir(&path_to_setting(&backup_root), &s.database_path);
+    let backup_path = notebook_dir.join(backup_filename_for_timestamp(timestamp));
+    if !backup_path.is_file() {
+        return Err("Selected backup is no longer available".into());
+    }
+    set_lock(&notebook_dir, timestamp, locked)?;
+    list_managed_backups()
 }
 
 fn reserve_unique_backup_dest(notebook_dir: &Path) -> Result<(PathBuf, u64), String> {
@@ -956,79 +1171,6 @@ fn promote_backup_no_clobber(tmp: &Path, dest: &Path) -> Result<(), String> {
         return Err("Backup destination already exists".into());
     }
     fs::rename(tmp, dest).map_err(|e| e.to_string())
-}
-
-fn snapshot_live_notebook_to_path(dest: &Path) -> Result<(), String> {
-    let parent = dest
-        .parent()
-        .ok_or_else(|| "Invalid backup path".to_string())?;
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let tmp = parent.join(backup_snapshot_temp_filename());
-    let snapshot_result = (|| {
-        {
-            let src = db_connection()?;
-            let mut dest_conn = Connection::open(&tmp).map_err(|e| e.to_string())?;
-            let backup = Backup::new(&src, &mut dest_conn).map_err(|e| e.to_string())?;
-            backup
-                .run_to_completion(5, Duration::from_millis(250), None)
-                .map_err(|e| e.to_string())?;
-        }
-        validate_sqlite_integrity(&tmp)?;
-        promote_backup_no_clobber(&tmp, dest)?;
-        Ok::<(), String>(())
-    })();
-    if snapshot_result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    snapshot_result
-}
-
-fn create_managed_backup_without_prune(settings: &AppSettings) -> Result<(PathBuf, u64), String> {
-    let src = PathBuf::from(&settings.database_path);
-    if !src.exists() {
-        return Err("Active database does not exist yet".into());
-    }
-    let notebook_dir = {
-        let backup_root = current_backups_dir()?;
-        managed_notebook_dir(&path_to_setting(&backup_root), &settings.database_path)
-    };
-    fs::create_dir_all(&notebook_dir).map_err(|e| e.to_string())?;
-    let (dest, timestamp) = reserve_unique_backup_dest(&notebook_dir)?;
-    snapshot_live_notebook_to_path(&dest)?;
-    Ok((notebook_dir, timestamp))
-}
-
-pub fn run_backup_now() -> Result<String, String> {
-    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
-    let (notebook_dir, timestamp) = create_managed_backup_without_prune(&s)?;
-    prune_managed_backups(&notebook_dir, timestamp)?;
-    let dest = notebook_dir.join(backup_filename_for_timestamp(timestamp));
-    Ok(dest.to_string_lossy().to_string())
-}
-
-pub fn run_scheduled_backup_if_due() -> Result<Option<String>, String> {
-    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
-    let backup_root = current_backups_dir()?;
-    let notebook_dir = managed_notebook_dir(&path_to_setting(&backup_root), &s.database_path);
-    let now = backup_now_secs();
-    if is_backup_due(&notebook_dir, now)? {
-        drop(s);
-        run_backup_now().map(Some)
-    } else {
-        Ok(None)
-    }
-}
-
-pub fn list_managed_backups() -> Result<Vec<ManagedBackupEntry>, String> {
-    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
-    let backup_root = current_backups_dir()?;
-    let notebook_dir = managed_notebook_dir(&path_to_setting(&backup_root), &s.database_path);
-    let mut timestamps = list_managed_backup_timestamps(&notebook_dir)?;
-    timestamps.sort_by(|a, b| b.cmp(a));
-    Ok(timestamps
-        .into_iter()
-        .map(|timestamp| ManagedBackupEntry { timestamp })
-        .collect())
 }
 
 fn notes_table_exists(conn: &Connection) -> Result<bool, String> {
@@ -1115,8 +1257,16 @@ pub(crate) fn restore_notes_from_backup_path(
     restore_notes_from_backup(live, backup_path)
 }
 
-pub fn restore_notebook_from_backup(timestamp: u64) -> Result<(), String> {
+pub type BackupPhaseReporter = Box<dyn Fn(&str) + Send>;
+
+pub fn restore_notebook_from_backup(
+    timestamp: u64,
+    create_backup_first: Option<bool>,
+    snapshot_progress: Option<SnapshotProgressReporter>,
+    phase: Option<BackupPhaseReporter>,
+) -> Result<(), String> {
     let settings = SETTINGS.lock().map_err(|e| e.to_string())?;
+    let should_backup_first = create_backup_first.unwrap_or(settings.backup_before_restore);
     let notebook_dir = {
         let backup_root = current_backups_dir()?;
         managed_notebook_dir(&path_to_setting(&backup_root), &settings.database_path)
@@ -1133,14 +1283,37 @@ pub fn restore_notebook_from_backup(timestamp: u64) -> Result<(), String> {
         validate_backup_notes_schema(&backup)?;
     }
 
-    let (notebook_dir, safety_timestamp) = create_managed_backup_without_prune(&settings)?;
+    let prune_reference_timestamp = if should_backup_first {
+        let (_, safety_timestamp) =
+            create_managed_backup_without_prune(&settings, snapshot_progress)?;
+        safety_timestamp
+    } else {
+        backup_now_secs()
+    };
+
+    if let Some(ref report_phase) = phase {
+        report_phase("restore");
+    }
 
     {
         let conn = db_connection()?;
         restore_notes_from_backup_path(&conn, &backup_path)?;
     }
 
-    prune_managed_backups(&notebook_dir, safety_timestamp)?;
+    let read = read_index(&notebook_dir);
+    let lock_state = backup_meta::lock_state_from_read(read.clone());
+    let prune_outcome = prune_managed_backups(&notebook_dir, prune_reference_timestamp, lock_state)?;
+    if let PruneOutcome::Suspended { reason } = prune_outcome {
+        eprintln!("TreeNote backup pruning suspended: {reason}");
+    }
+    if matches!(read, IndexReadResult::Ok(_)) {
+        let existing = existing_backup_timestamps(&notebook_dir)?;
+        forget_missing(&notebook_dir, &existing)?;
+    }
+
+    if let Some(report_phase) = phase {
+        report_phase("finished");
+    }
     Ok(())
 }
 
@@ -2050,6 +2223,7 @@ mod tests {
             password_hash: None,
             editor_font_family: "system".into(),
             minimize_to_tray: true,
+            backup_before_restore: true,
         }
     }
 
@@ -2350,6 +2524,7 @@ mod tests {
             password_hash: None,
             editor_font_family: "system".into(),
             minimize_to_tray: true,
+            backup_before_restore: true,
         })
         .expect("serialize original");
         fs::write(&settings_file, &original).expect("write original");
@@ -2369,7 +2544,7 @@ mod tests {
                     .share_mode(0)
                     .open(&settings_file)
                     .expect("exclusive lock");
-                atomic_replace_file(&tmp, &settings_file).expect_err("replace fails")
+                atomic_file::atomic_replace_file(&tmp, &settings_file).expect_err("replace fails")
             };
             assert!(!err.is_empty());
             let still = fs::read_to_string(&settings_file).expect("read preserved");
@@ -2384,7 +2559,7 @@ mod tests {
             let mut perms = fs::metadata(&dir).expect("dir metadata").permissions();
             perms.set_mode(0o555);
             fs::set_permissions(&dir, perms).expect("make dir read-only");
-            let err = atomic_replace_file(&tmp, &settings_file).expect_err("replace fails");
+            let err = atomic_file::atomic_replace_file(&tmp, &settings_file).expect_err("replace fails");
             assert!(!err.is_empty());
             perms.set_mode(0o700);
             fs::set_permissions(&dir, perms).expect("restore dir permissions");
@@ -2913,7 +3088,7 @@ mod tests {
         }
 
         let (created_dir, timestamp) =
-            create_managed_backup_without_prune(&settings).expect("managed backup");
+            create_managed_backup_without_prune(&settings, None).expect("managed backup");
         assert_eq!(created_dir, notebook_dir);
         let dest = notebook_dir.join(backup_filename_for_timestamp(timestamp));
         validate_sqlite_integrity(&dest).expect("backup integrity");
@@ -2979,6 +3154,43 @@ mod tests {
             .join(backup_filename_for_timestamp(prune_candidate_ts))
             .is_file());
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_progress_counts_uses_pagecount_as_total() {
+        assert_eq!(snapshot_progress_counts(100, 40), (60, 100));
+        assert_eq!(snapshot_progress_counts(100, 0), (100, 100));
+        assert_eq!(snapshot_progress_counts(0, 0), (0, 0));
+        assert_eq!(snapshot_progress_counts(-5, 3), (0, 0));
+        assert_eq!(snapshot_progress_counts(10, -3), (10, 10));
+        assert_eq!(snapshot_progress_counts(8, 8), (0, 8));
+        let (done, total) = snapshot_progress_counts(50, 0);
+        assert_eq!(done, total);
+    }
+
+    #[test]
+    fn successful_backup_survives_metadata_write_failure() {
+        let dir = std::env::temp_dir().join(format!("treenote-meta-fail-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("dir");
+        let timestamp = 1_700_000_000u64;
+        let backup_path = dir.join(backup_filename_for_timestamp(timestamp));
+        fs::write(&backup_path, b"sqlite").expect("backup file");
+        fs::create_dir_all(dir.join(crate::backup_meta::METADATA_FILENAME))
+            .expect("metadata path is a directory");
+
+        let (result, _) = finalize_backup_prune_and_metadata(
+            &dir,
+            timestamp,
+            Some("label".into()),
+            true,
+        )
+        .expect("backup itself must succeed");
+
+        assert!(backup_path.is_file());
+        assert!(!result.metadata_saved);
+        let warning = result.metadata_warning.expect("warning");
+        assert!(warning.contains("could not be saved"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
