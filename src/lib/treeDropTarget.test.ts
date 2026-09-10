@@ -168,6 +168,47 @@ describe("createTreeDropCollision", () => {
     expect(firstHitId(inRootGap)).toBe(ROOT_DROP_AREA_ID);
   });
 
+  it("targets the row under the pointer even when cached rects are stale", () => {
+    // dnd-kit measures droppables when the drag starts. If the list scrolls
+    // mid-drag those cached rects still describe the old positions, so the
+    // pointer must be tested against the rows as they are on screen now.
+    const scrolledBy = 30;
+    const containers = standardContainers().map((container) => {
+      const live = container.rect.current!;
+      return {
+        ...container,
+        node: {
+          current: {
+            getBoundingClientRect: () =>
+              clientRect(live.left, live.top - scrolledBy, live.width, live.height),
+          },
+        },
+      };
+    });
+
+    const result = detect(
+      collisionArgs({
+        activeId: "A",
+        containers: containers as unknown as ReturnType<typeof droppable>[],
+        pointer: { x: 50, y: 50 },
+      }),
+    );
+
+    // Cached rects put row B at y 30-60; on screen it now spans y 0-30 and
+    // child-a occupies y 30-60. child-a is excluded, so the root area wins.
+    expect(firstHitId(result)).toBe(ROOT_DROP_AREA_ID);
+
+    const ontoB = detect(
+      collisionArgs({
+        activeId: "A",
+        containers: containers as unknown as ReturnType<typeof droppable>[],
+        pointer: { x: 50, y: 20 },
+      }),
+    );
+    expect(ontoB).toHaveLength(1);
+    expect(firstHitId(ontoB)).toBe("B");
+  });
+
   it("resolves overlapping candidates deterministically", () => {
     const pointer = { x: 50, y: 35 };
     const first = firstHitId(

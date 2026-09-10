@@ -30,6 +30,7 @@ import {
   DragStartEvent,
   DragOverlay,
 } from "@dnd-kit/core";
+import { createPortal } from "react-dom";
 import {
   buildInsertBeforeMove,
   buildReparentMove,
@@ -1718,11 +1719,19 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                 </FlatTree>
               </div>
             </DropArea>
-            <DragOverlay dropAnimation={null}>
-              {activeDragId ? (
-                <div className="tree-drag-overlay">{activeDragLabel}</div>
-              ) : null}
-            </DragOverlay>
+            {/* The overlay is position: fixed, so it must not live inside an
+                ancestor that creates a containing block for fixed elements
+                (.tree-panel sets a transform). Portalling to the body keeps
+                its coordinates — and the collision rect dnd-kit derives from
+                them — in the viewport space the pointer is measured in. */}
+            {createPortal(
+              <DragOverlay dropAnimation={null}>
+                {activeDragId ? (
+                  <div className="tree-drag-overlay">{activeDragLabel}</div>
+                ) : null}
+              </DragOverlay>,
+              document.body,
+            )}
           </DndContext>
           <NodeContextMenu
             open={contextMenu !== null}
