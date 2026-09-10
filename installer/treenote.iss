@@ -34,6 +34,8 @@ Name: "{userdesktop}\TreeNote"; Filename: "{app}\{#MyAppExeName}"; Tasks: deskto
 
 [Registry]
 Root: HKCU; Subkey: "Software\TreeNote"; ValueType: string; ValueName: "DataRoot"; ValueData: "{code:GetDataRoot}"
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "TreeNote"; Flags: dontcreatekey uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"; ValueType: none; ValueName: "TreeNote"; Flags: dontcreatekey uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch TreeNote"; Flags: nowait postinstall skipifsilent

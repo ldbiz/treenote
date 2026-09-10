@@ -1,6 +1,7 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { FluentProvider, webDarkTheme, webLightTheme } from "@fluentui/react-components";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AutoTheme, Moon, Sun } from "./components/icons";
 import { useTheme, type ThemePreference } from "./hooks/useTheme";
 import { useEditorFont, type EditorFontFamily } from "./hooks/useEditorFont";
@@ -78,6 +79,11 @@ type NotebookCounts = {
   trees: number;
 };
 
+type RunOnStartupStatus = {
+  supported: boolean;
+  enabled: boolean;
+};
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -143,6 +149,7 @@ function OptionsApp() {
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
   const [dialogSelectedTimestamp, setDialogSelectedTimestamp] = useState<number | null>(null);
   const [notebookCounts, setNotebookCounts] = useState<NotebookCounts | null>(null);
+  const [runOnStartup, setRunOnStartup] = useState<RunOnStartupStatus | null>(null);
 
   const isBusy = (action: string) => busyAction === action;
   const isAnyBusy = busyAction !== null;
@@ -180,6 +187,15 @@ function OptionsApp() {
     return counts;
   };
 
+  const refreshRunOnStartup = useCallback(async () => {
+    try {
+      const status = await invoke<RunOnStartupStatus>("get_run_on_startup");
+      setRunOnStartup(status);
+    } catch {
+      setRunOnStartup({ supported: false, enabled: false });
+    }
+  }, []);
+
   const closeRestoreDialog = () => {
     setRestoreDialogOpen(false);
     setDialogSelectedTimestamp(null);
@@ -198,7 +214,7 @@ function OptionsApp() {
     if (isEditorFontId(family)) {
       setEditorFontFamily(family);
     }
-    await Promise.all([loadBackups(), loadNotebookCounts()]);
+    await Promise.all([loadBackups(), loadNotebookCounts(), refreshRunOnStartup()]);
     setLoading(false);
   };
 
@@ -207,6 +223,22 @@ function OptionsApp() {
       showSectionMessage("notebook", "error", `Failed to load settings: ${errorText(error)}`),
     );
   }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) {
+          void refreshRunOnStartup();
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => {
+      unlisten?.();
+    };
+  }, [refreshRunOnStartup]);
 
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
@@ -388,6 +420,24 @@ function OptionsApp() {
       setSettings(saved);
     } catch (error) {
       showSectionMessage("general", "error", `Failed to save setting: ${errorText(error)}`);
+    }
+  };
+
+  const persistRunOnStartup = async (enabled: boolean) => {
+    clearSectionMessage("general");
+    setRunOnStartup((current) =>
+      current ? { ...current, enabled } : { supported: true, enabled },
+    );
+    try {
+      const status = await invoke<RunOnStartupStatus>("set_run_on_startup", { enabled });
+      setRunOnStartup(status);
+    } catch (error) {
+      await refreshRunOnStartup();
+      showSectionMessage(
+        "general",
+        "error",
+        `Failed to update startup setting: ${errorText(error)}`,
+      );
     }
   };
 
@@ -661,6 +711,26 @@ function OptionsApp() {
             When enabled, closing or minimizing TreeNote hides it to the tray. When disabled, it
             behaves like a normal app in the taskbar.
           </p>
+          {runOnStartup?.supported ? (
+            <>
+              <label className="options-field options-checkbox-field">
+                <input
+                  type="checkbox"
+                  className="options-checkbox"
+                  checked={runOnStartup.enabled}
+                  disabled={isAnyBusy}
+                  onChange={(e) => {
+                    void persistRunOnStartup(e.target.checked);
+                  }}
+                />
+                <span className="options-checkbox-label">Run TreeNote on startup</span>
+              </label>
+              <p className="options-field-hint">
+                Windows&apos; own Startup apps settings can also disable this. If TreeNote does not
+                start, turn this off and on again.
+              </p>
+            </>
+          ) : null}
         </OptionsSection>
 
         <OptionsSection

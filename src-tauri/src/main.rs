@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod backup;
 mod convert;
 mod data_root;
@@ -196,6 +197,16 @@ fn is_dev_mode() -> bool {
 }
 
 #[tauri::command]
+fn get_run_on_startup() -> autostart::RunOnStartupStatus {
+    autostart::status()
+}
+
+#[tauri::command]
+fn set_run_on_startup(enabled: bool) -> Result<autostart::RunOnStartupStatus, String> {
+    autostart::set_enabled(enabled)
+}
+
+#[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     for (_label, window) in app.webview_windows() {
         let _ = window.destroy();
@@ -319,6 +330,7 @@ fn recover_notebook(
 }
 
 fn run_startup() -> Result<(), String> {
+    autostart::repair_path_if_present();
     match storage::prepare_startup()? {
         storage::StartupAction::Continue => {
             let _ = storage::run_scheduled_backup_if_due();
@@ -422,6 +434,8 @@ fn main() {
             set_password,
             remove_password,
             is_dev_mode,
+            get_run_on_startup,
+            set_run_on_startup,
             quit_app
         ])
         .run(tauri::generate_context!())
