@@ -686,6 +686,43 @@ mod tests {
     }
 
     #[test]
+    fn malformed_metadata_timestamp_key_suspends_pruning() {
+        let dir = temp_dir();
+        let now = 1_700_000_000u64;
+        for i in 0..30 {
+            write_backup(&dir, now - i * HOUR);
+        }
+        fs::write(
+            dir.join(crate::backup_meta::METADATA_FILENAME),
+            r#"{"not-a-timestamp":{"locked":true}}"#,
+        )
+        .expect("write metadata");
+        let before = fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| is_managed_backup_filename(&e.file_name().to_string_lossy()))
+                    .unwrap_or(false)
+            })
+            .count();
+        let lock_state = crate::backup_meta::lock_state(&dir);
+        assert_eq!(lock_state, LockState::Unavailable);
+        let outcome = prune_managed_backups(&dir, now, lock_state).expect("prune call");
+        assert!(matches!(outcome, PruneOutcome::Suspended { .. }));
+        let after = fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| is_managed_backup_filename(&e.file_name().to_string_lossy()))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(before, after);
+        assert_eq!(before, 30);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn managed_notebook_dir_structure() {
         let dir = managed_notebook_dir("C:/backups", "C:/notes/mybook.sqlite3");
         let path_str = dir.to_string_lossy();

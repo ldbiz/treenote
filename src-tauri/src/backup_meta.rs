@@ -41,9 +41,17 @@ fn timestamp_key(timestamp: u64) -> String {
     timestamp.to_string()
 }
 
+fn parse_timestamp_key(key: &str) -> Result<u64, String> {
+    key.parse::<u64>()
+        .map_err(|_| format!("Invalid backup metadata timestamp key: {key}"))
+}
+
 fn parse_index_json(content: &str) -> Result<BackupIndex, String> {
     let raw: HashMap<String, BackupMeta> =
         serde_json::from_str(content).map_err(|e| format!("Invalid backup metadata: {e}"))?;
+    for key in raw.keys() {
+        parse_timestamp_key(key)?;
+    }
     Ok(BackupIndex { entries: raw })
 }
 
@@ -95,19 +103,21 @@ pub fn lock_state_from_read(read: IndexReadResult) -> LockState {
             LockState::Unavailable
         }
         IndexReadResult::Absent => LockState::Known(HashSet::new()),
-        IndexReadResult::Ok(index) => LockState::Known(
-            index
-                .entries
-                .iter()
-                .filter_map(|(key, meta)| {
-                    if meta.locked {
-                        key.parse().ok()
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        ),
+        IndexReadResult::Ok(index) => {
+            let mut locked = HashSet::new();
+            for (key, meta) in &index.entries {
+                let Ok(timestamp) = parse_timestamp_key(key) else {
+                    eprintln!(
+                        "TreeNote backup metadata unavailable: invalid timestamp key {key}"
+                    );
+                    return LockState::Unavailable;
+                };
+                if meta.locked {
+                    locked.insert(timestamp);
+                }
+            }
+            LockState::Known(locked)
+        }
     }
 }
 
@@ -210,8 +220,15 @@ pub fn forget_missing(dir: &Path, existing_timestamps: &HashSet<u64>) -> Result<
     let IndexReadResult::Ok(mut index) = read else {
         return Ok(());
     };
+    if index
+        .entries
+        .keys()
+        .any(|key| parse_timestamp_key(key).is_err())
+    {
+        return Ok(());
+    }
     index.entries.retain(|key, _| {
-        key.parse::<u64>()
+        parse_timestamp_key(key)
             .ok()
             .map(|ts| existing_timestamps.contains(&ts))
             .unwrap_or(false)
@@ -317,6 +334,49 @@ mod tests {
         assert!(err.contains("unreadable"));
         let content = fs::read_to_string(metadata_path(&dir)).expect("still corrupt");
         assert_eq!(content, "{");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_timestamp_key_is_unreadable() {
+        let dir = temp_dir();
+        fs::write(
+            metadata_path(&dir),
+            r#"{"not-a-timestamp":{"locked":true}}"#,
+        )
+        .expect("write");
+        assert!(matches!(read_index(&dir), IndexReadResult::Unreadable(_)));
+        assert_eq!(
+            lock_state_from_read(read_index(&dir)),
+            LockState::Unavailable
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lock_state_from_hand_built_index_with_bad_key_is_unavailable() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "bad-key".to_string(),
+            BackupMeta {
+                label: None,
+                locked: true,
+            },
+        );
+        assert_eq!(
+            lock_state_from_read(IndexReadResult::Ok(BackupIndex { entries })),
+            LockState::Unavailable
+        );
+    }
+
+    #[test]
+    fn forget_missing_leaves_malformed_on_disk_index_untouched() {
+        let dir = temp_dir();
+        let raw = r#"{"not-a-timestamp":{"locked":true}}"#;
+        fs::write(metadata_path(&dir), raw).expect("write");
+        forget_missing(&dir, &HashSet::new()).expect("forget");
+        let content = fs::read_to_string(metadata_path(&dir)).expect("read");
+        assert_eq!(content, raw);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -945,6 +945,12 @@ pub struct RunBackupNowResult {
 
 pub type SnapshotProgressReporter = Box<dyn Fn(u32, u32) + Send>;
 
+pub(crate) fn snapshot_progress_counts(pagecount: i32, remaining: i32) -> (u32, u32) {
+    let total = pagecount.max(0) as u32;
+    let done = total.saturating_sub(remaining.max(0) as u32);
+    (done, total)
+}
+
 fn run_backup_snapshot_with_progress(
     dest: &Path,
     progress: Option<SnapshotProgressReporter>,
@@ -966,17 +972,17 @@ fn run_backup_snapshot_with_progress(
                     StepResult::Done => {
                         if let Some(ref report) = progress {
                             let p = backup.progress();
-                            report(p.pagecount.max(0) as u32, 0);
+                            let (_, total) = snapshot_progress_counts(p.pagecount, p.remaining);
+                            report(total, total);
                         }
                         break;
                     }
                     StepResult::More => {
                         if let Some(ref report) = progress {
                             let p = backup.progress();
-                            report(
-                                p.pagecount.max(0) as u32,
-                                p.remaining.max(0) as u32,
-                            );
+                            let (done, total) =
+                                snapshot_progress_counts(p.pagecount, p.remaining);
+                            report(done, total);
                         }
                     }
                     StepResult::Busy | StepResult::Locked => {
@@ -1027,21 +1033,23 @@ fn finalize_backup_prune_and_metadata(
         eprintln!("TreeNote backup pruning suspended: {reason}");
     }
     let existing = existing_backup_timestamps(notebook_dir)?;
-    if matches!(read, IndexReadResult::Ok(_)) {
-        forget_missing(notebook_dir, &existing)?;
-    }
-    let dest = notebook_dir.join(backup_filename_for_timestamp(timestamp));
     let mut metadata_saved = true;
     let mut metadata_warning_result = metadata_warning.clone();
-    if label.is_some() || locked {
-        if backup_meta::index_is_writable(notebook_dir) {
-            set_entry(notebook_dir, timestamp, label, locked)?;
-        } else {
+    if matches!(read, IndexReadResult::Ok(_)) {
+        if let Err(reason) = forget_missing(notebook_dir, &existing) {
             metadata_saved = false;
-            metadata_warning_result = Some(
-                "Backup was created, but its label or lock could not be saved because backup metadata is unreadable."
-                    .into(),
-            );
+            metadata_warning_result = Some(format!(
+                "Backup was created, but backup metadata could not be updated: {reason}"
+            ));
+        }
+    }
+    let dest = notebook_dir.join(backup_filename_for_timestamp(timestamp));
+    if label.is_some() || locked {
+        if let Err(reason) = set_entry(notebook_dir, timestamp, label, locked) {
+            metadata_saved = false;
+            metadata_warning_result = Some(format!(
+                "Backup was created, but its label or lock could not be saved: {reason}"
+            ));
         }
     }
     Ok((
@@ -3163,6 +3171,43 @@ mod tests {
             .join(backup_filename_for_timestamp(prune_candidate_ts))
             .is_file());
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_progress_counts_uses_pagecount_as_total() {
+        assert_eq!(snapshot_progress_counts(100, 40), (60, 100));
+        assert_eq!(snapshot_progress_counts(100, 0), (100, 100));
+        assert_eq!(snapshot_progress_counts(0, 0), (0, 0));
+        assert_eq!(snapshot_progress_counts(-5, 3), (0, 0));
+        assert_eq!(snapshot_progress_counts(10, -3), (10, 10));
+        assert_eq!(snapshot_progress_counts(8, 8), (0, 8));
+        let (done, total) = snapshot_progress_counts(50, 0);
+        assert_eq!(done, total);
+    }
+
+    #[test]
+    fn successful_backup_survives_metadata_write_failure() {
+        let dir = std::env::temp_dir().join(format!("treenote-meta-fail-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("dir");
+        let timestamp = 1_700_000_000u64;
+        let backup_path = dir.join(backup_filename_for_timestamp(timestamp));
+        fs::write(&backup_path, b"sqlite").expect("backup file");
+        fs::create_dir_all(dir.join(crate::backup_meta::METADATA_FILENAME))
+            .expect("metadata path is a directory");
+
+        let (result, _) = finalize_backup_prune_and_metadata(
+            &dir,
+            timestamp,
+            Some("label".into()),
+            true,
+        )
+        .expect("backup itself must succeed");
+
+        assert!(backup_path.is_file());
+        assert!(!result.metadata_saved);
+        let warning = result.metadata_warning.expect("warning");
+        assert!(warning.contains("could not be saved"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

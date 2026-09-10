@@ -41,8 +41,7 @@ fn emit_backup_progress(app: &AppHandle, request_id: &str, phase: &str, done: u3
 }
 
 fn snapshot_progress_for(app: AppHandle, request_id: String) -> storage::SnapshotProgressReporter {
-    Box::new(move |done, remaining| {
-        let total = done.saturating_add(remaining);
+    Box::new(move |done, total| {
         emit_backup_progress(&app, &request_id, "snapshot", done, total);
     })
 }
