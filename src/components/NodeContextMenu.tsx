@@ -10,6 +10,7 @@ export type NodeContextMenuAction = "rename" | "duplicate" | "export" | "delete"
 type NodeContextMenuProps = {
   open: boolean;
   position: { x: number; y: number } | null;
+  stats?: string;
   onAction: (action: NodeContextMenuAction) => void;
   onClose: (detail: PopupMenuCloseDetail) => void;
 };
@@ -17,6 +18,7 @@ type NodeContextMenuProps = {
 export default function NodeContextMenu({
   open,
   position,
+  stats,
   onAction,
   onClose,
 }: NodeContextMenuProps) {
@@ -39,7 +41,7 @@ export default function NodeContextMenu({
       className="node-context-menu"
       style={{ top: position.y, left: position.x }}
       role="menu"
-      aria-label="Note actions"
+      aria-label={stats ? `Note actions. ${stats}` : "Note actions"}
       onContextMenu={(e) => e.preventDefault()}
     >
       <button type="button" role="menuitem" onClick={() => onAction("rename")}>
@@ -64,6 +66,14 @@ export default function NodeContextMenu({
       >
         Delete
       </button>
+      {stats ? (
+        <>
+          <div className="node-context-menu-divider" role="separator" />
+          <div className="node-context-menu-info" aria-hidden="true">
+            {stats}
+          </div>
+        </>
+      ) : null}
     </div>,
     document.body
   );
