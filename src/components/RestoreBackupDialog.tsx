@@ -207,7 +207,9 @@ export default function RestoreBackupDialog({
                     disabled={busy}
                     onChange={(event) => onKeepSelectedChange(event.target.checked)}
                   />
-                  <span className="options-checkbox-label">Keep selected backup</span>
+                  <span className="options-checkbox-label">
+                    Keep this backup (exclude from automatic cleanup)
+                  </span>
                 </label>
               ) : null}
             </div>

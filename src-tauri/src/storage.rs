@@ -20,7 +20,7 @@ use crate::backup::{
 };
 use crate::backup_meta::{
     self, forget_missing, meta_for_timestamp, metadata_warning, read_index, set_entry, set_lock,
-    IndexReadResult,
+    IndexReadResult, LockState,
 };
 use crate::atomic_file;
 use crate::data_root::{self, DEFAULT_NOTEBOOK_FILENAME};
@@ -1103,13 +1103,19 @@ pub fn run_scheduled_backup_if_due() -> Result<Option<RunBackupNowResult>, Strin
     }
 }
 
-pub fn list_managed_backups() -> Result<ManagedBackupList, String> {
+fn current_managed_backup_dir() -> Result<PathBuf, String> {
     let s = SETTINGS.lock().map_err(|e| e.to_string())?;
     let backup_root = current_backups_dir()?;
-    let notebook_dir = managed_notebook_dir(&path_to_setting(&backup_root), &s.database_path);
-    let read = read_index(&notebook_dir);
+    Ok(managed_notebook_dir(
+        &path_to_setting(&backup_root),
+        &s.database_path,
+    ))
+}
+
+fn list_managed_backups_in(notebook_dir: &Path) -> Result<ManagedBackupList, String> {
+    let read = read_index(notebook_dir);
     let warning = metadata_warning(read.clone());
-    let mut timestamps = list_managed_backup_timestamps(&notebook_dir)?;
+    let mut timestamps = list_managed_backup_timestamps(notebook_dir)?;
     timestamps.sort_by(|a, b| b.cmp(a));
     Ok(ManagedBackupList {
         entries: timestamps
@@ -1127,16 +1133,18 @@ pub fn list_managed_backups() -> Result<ManagedBackupList, String> {
     })
 }
 
+pub fn list_managed_backups() -> Result<ManagedBackupList, String> {
+    list_managed_backups_in(&current_managed_backup_dir()?)
+}
+
 pub fn set_backup_lock(timestamp: u64, locked: bool) -> Result<ManagedBackupList, String> {
-    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
-    let backup_root = current_backups_dir()?;
-    let notebook_dir = managed_notebook_dir(&path_to_setting(&backup_root), &s.database_path);
+    let notebook_dir = current_managed_backup_dir()?;
     let backup_path = notebook_dir.join(backup_filename_for_timestamp(timestamp));
     if !backup_path.is_file() {
         return Err("Selected backup is no longer available".into());
     }
     set_lock(&notebook_dir, timestamp, locked)?;
-    list_managed_backups()
+    list_managed_backups_in(&notebook_dir)
 }
 
 fn reserve_unique_backup_dest(notebook_dir: &Path) -> Result<(PathBuf, u64), String> {
@@ -1257,6 +1265,16 @@ pub(crate) fn restore_notes_from_backup_path(
     restore_notes_from_backup(live, backup_path)
 }
 
+fn lock_state_preserving_backup(lock_state: LockState, timestamp: u64) -> LockState {
+    match lock_state {
+        LockState::Known(mut locked) => {
+            locked.insert(timestamp);
+            LockState::Known(locked)
+        }
+        other => other,
+    }
+}
+
 pub type BackupPhaseReporter = Box<dyn Fn(&str) + Send>;
 
 pub fn restore_notebook_from_backup(
@@ -1301,7 +1319,10 @@ pub fn restore_notebook_from_backup(
     }
 
     let read = read_index(&notebook_dir);
-    let lock_state = backup_meta::lock_state_from_read(read.clone());
+    let lock_state = lock_state_preserving_backup(
+        backup_meta::lock_state_from_read(read.clone()),
+        timestamp,
+    );
     let prune_outcome = prune_managed_backups(&notebook_dir, prune_reference_timestamp, lock_state)?;
     if let PruneOutcome::Suspended { reason } = prune_outcome {
         eprintln!("TreeNote backup pruning suspended: {reason}");
@@ -3343,5 +3364,94 @@ mod tests {
         let warning = result.metadata_warning.expect("warning");
         assert!(warning.contains("could not be saved"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_backup_lock_returns_updated_list_without_deadlocking() {
+        let dir = TestRoot::new("treenote-backup-lock");
+        let (_settings, notebook_dir) =
+            install_live_notebook_for_backup_tests(&dir, "lock-content");
+        let timestamp = 1_700_000_000u64;
+        write_valid_managed_backup(&notebook_dir, timestamp, "lock-body");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(set_backup_lock(timestamp, true));
+        });
+        let list = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("set_backup_lock deadlocked on SETTINGS")
+            .expect("lock backup");
+        let entry = list
+            .entries
+            .iter()
+            .find(|entry| entry.timestamp == timestamp)
+            .expect("listed");
+        assert!(entry.locked);
+
+        let unlocked = set_backup_lock(timestamp, false).expect("unlock");
+        let entry = unlocked
+            .entries
+            .iter()
+            .find(|entry| entry.timestamp == timestamp)
+            .expect("listed");
+        assert!(!entry.locked);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_keeps_source_backup_even_when_unlocked_and_prune_eligible() {
+        use crate::backup::backups_to_keep;
+
+        let dir = TestRoot::new("treenote-restore-keep-src");
+        let (_settings, notebook_dir) =
+            install_live_notebook_for_backup_tests(&dir, "live-content");
+        let now = backup_now_secs();
+        for i in 1..=24 {
+            write_valid_managed_backup(&notebook_dir, now - i * 3600, &format!("hour-{i}"));
+        }
+        let source_ts = now - 25 * 3600;
+        write_valid_managed_backup(&notebook_dir, source_ts, "from-backup");
+        let timestamps = list_managed_backup_timestamps(&notebook_dir).expect("list");
+        let keep = backups_to_keep(&timestamps, now);
+        assert!(
+            !keep.contains(&source_ts),
+            "test setup requires a prune-eligible restore source"
+        );
+
+        restore_notebook_from_backup(source_ts, Some(false), None, None).expect("restore");
+
+        assert!(
+            notebook_dir
+                .join(backup_filename_for_timestamp(source_ts))
+                .is_file(),
+            "restoring must not delete the backup being restored from"
+        );
+        let live = db_connection().expect("live");
+        let restored: String = live
+            .query_row("SELECT content FROM notes WHERE id='n1'", [], |row| {
+                row.get(0)
+            })
+            .expect("read live");
+        assert_eq!(restored, "from-backup");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lock_state_preserving_backup_pins_source_without_changing_unavailable() {
+        let mut locked = std::collections::HashSet::new();
+        locked.insert(1);
+        let known = lock_state_preserving_backup(LockState::Known(locked), 42);
+        match known {
+            LockState::Known(set) => {
+                assert!(set.contains(&1));
+                assert!(set.contains(&42));
+            }
+            LockState::Unavailable => panic!("should stay known"),
+        }
+        assert_eq!(
+            lock_state_preserving_backup(LockState::Unavailable, 42),
+            LockState::Unavailable
+        );
     }
 }
