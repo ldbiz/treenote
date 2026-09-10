@@ -51,6 +51,10 @@ import {
 } from "../lib/treeKeyboard";
 import { cancelTreeFocus, focusTreeNode } from "../lib/treeFocus";
 import {
+  countDescendants,
+  formatSubtreeStats,
+} from "../lib/treeStats";
+import {
   DEPTH_LIMIT_ADD_MESSAGE,
   DEPTH_LIMIT_MOVE_MESSAGE,
   canAddChildAtLevel,
@@ -977,6 +981,14 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
     const [renameRequestId, setRenameRequestId] = useState<string | null>(null);
     const treeScrollerRef = useRef<HTMLDivElement>(null);
 
+    const contextMenuStats = useMemo(() => {
+      if (!contextMenu) return undefined;
+      const item = items.find((entry) => entry.value === contextMenu.nodeId);
+      if (!item) return undefined;
+      const count = countDescendants(items, contextMenu.nodeId);
+      return formatSubtreeStats(count, item.parentValue === undefined);
+    }, [contextMenu, items]);
+
     const reloadTreeFromBackend = useCallback(
       async (preserveOpenItems: Set<UniqueIdentifier>) => {
         const freshTreeData = await getInitialTree();
@@ -1787,6 +1799,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                 ? { x: contextMenu.x, y: contextMenu.y }
                 : null
             }
+            stats={contextMenuStats}
             onAction={(action) => {
               void handleContextMenuAction(action);
             }}
