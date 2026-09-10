@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 #[cfg(windows)]
@@ -32,5 +31,5 @@ pub fn atomic_replace_file(tmp: &Path, dest: &Path) -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn atomic_replace_file(tmp: &Path, dest: &Path) -> Result<(), String> {
-    fs::rename(tmp, dest).map_err(|e| e.to_string())
+    std::fs::rename(tmp, dest).map_err(|e| e.to_string())
 }

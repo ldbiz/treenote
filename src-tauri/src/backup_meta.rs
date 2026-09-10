@@ -92,10 +92,6 @@ pub fn write_index(dir: &Path, index: &BackupIndex) -> Result<(), String> {
     result
 }
 
-pub fn lock_state(dir: &Path) -> LockState {
-    lock_state_from_read(read_index(dir))
-}
-
 pub fn lock_state_from_read(read: IndexReadResult) -> LockState {
     match read {
         IndexReadResult::Unreadable(reason) => {
@@ -241,10 +237,6 @@ pub fn forget_missing(dir: &Path, existing_timestamps: &HashSet<u64>) -> Result<
         return Ok(());
     }
     write_index(dir, &index)
-}
-
-pub fn index_is_writable(dir: &Path) -> bool {
-    !matches!(read_index(dir), IndexReadResult::Unreadable(_))
 }
 
 #[cfg(test)]

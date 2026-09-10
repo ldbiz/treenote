@@ -278,16 +278,6 @@ fn write_settings_json_atomically(path: &Path, json: &str) -> Result<(), String>
     result
 }
 
-#[cfg(windows)]
-fn atomic_replace_file(tmp: &Path, dest: &Path) -> Result<(), String> {
-    atomic_file::atomic_replace_file(tmp, dest)
-}
-
-#[cfg(not(windows))]
-fn atomic_replace_file(tmp: &Path, dest: &Path) -> Result<(), String> {
-    atomic_file::atomic_replace_file(tmp, dest)
-}
-
 fn save_settings_to_path(path: &Path, settings: &AppSettings) -> Result<(), String> {
     let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     write_settings_json_atomically(path, &json)
@@ -749,13 +739,6 @@ pub fn update_settings(
     public_settings_from(s.clone())
 }
 
-pub fn backup_before_restore_enabled() -> bool {
-    SETTINGS
-        .lock()
-        .map(|s| s.backup_before_restore)
-        .unwrap_or(true)
-}
-
 pub fn minimize_to_tray_enabled() -> bool {
     SETTINGS
         .lock()
@@ -964,7 +947,7 @@ fn run_backup_snapshot_with_progress(
         {
             let src = db_connection()?;
             let mut dest_conn = Connection::open(&tmp).map_err(|e| e.to_string())?;
-            let mut backup = Backup::new(&src, &mut dest_conn).map_err(|e| e.to_string())?;
+            let backup = Backup::new(&src, &mut dest_conn).map_err(|e| e.to_string())?;
             let pages_per_step = 5;
             let pause = Duration::from_millis(250);
             loop {
@@ -2561,7 +2544,7 @@ mod tests {
                     .share_mode(0)
                     .open(&settings_file)
                     .expect("exclusive lock");
-                atomic_replace_file(&tmp, &settings_file).expect_err("replace fails")
+                atomic_file::atomic_replace_file(&tmp, &settings_file).expect_err("replace fails")
             };
             assert!(!err.is_empty());
             let still = fs::read_to_string(&settings_file).expect("read preserved");
@@ -2576,7 +2559,7 @@ mod tests {
             let mut perms = fs::metadata(&dir).expect("dir metadata").permissions();
             perms.set_mode(0o555);
             fs::set_permissions(&dir, perms).expect("make dir read-only");
-            let err = atomic_replace_file(&tmp, &settings_file).expect_err("replace fails");
+            let err = atomic_file::atomic_replace_file(&tmp, &settings_file).expect_err("replace fails");
             assert!(!err.is_empty());
             perms.set_mode(0o700);
             fs::set_permissions(&dir, perms).expect("restore dir permissions");

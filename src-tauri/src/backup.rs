@@ -331,14 +331,6 @@ pub fn prune_managed_backups(
     Ok(PruneOutcome::Pruned)
 }
 
-/// Convenience wrapper for callers that have no lock metadata (tests, legacy paths).
-pub fn prune_managed_backups_without_locks(dir: &Path, now: u64) -> Result<(), String> {
-    match prune_managed_backups(dir, now, LockState::Known(HashSet::new()))? {
-        PruneOutcome::Pruned => Ok(()),
-        PruneOutcome::Suspended { reason } => Err(reason),
-    }
-}
-
 pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -705,7 +697,8 @@ mod tests {
                     .unwrap_or(false)
             })
             .count();
-        let lock_state = crate::backup_meta::lock_state(&dir);
+        let lock_state =
+            crate::backup_meta::lock_state_from_read(crate::backup_meta::read_index(&dir));
         assert_eq!(lock_state, LockState::Unavailable);
         let outcome = prune_managed_backups(&dir, now, lock_state).expect("prune call");
         assert!(matches!(outcome, PruneOutcome::Suspended { .. }));
