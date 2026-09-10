@@ -19,6 +19,7 @@ import { pickJsonExportPath, showMessage } from "./lib/dialogs";
 import { joinExportPath } from "./lib/exportPath";
 import {
   FLUSH_REQUEST_KEY,
+  createFlushRequestId,
   writeFlushResult,
   type FlushRequest,
 } from "./lib/editorFlushBridge";
@@ -124,26 +125,33 @@ function App() {
     }
   }, []);
 
-  const handleBackupRestoreRequest = useCallback(async (timestamp: number) => {
-    try {
-      await textPanelRef.current?.flushPendingEdit();
-      await invoke("restore_notebook_from_backup", { timestamp });
-      setSelectedNodeId(null);
-      setIsTreeFilterEnabled(false);
-      setTreeFocusNodeIds(null);
-      setRawMatchingNodeIdsSet(null);
-      setReloadKey((key) => key + 1);
-      localStorage.setItem(
-        "treenote-backup-restore-result",
-        JSON.stringify({ ok: true, timestamp, at: Date.now() }),
-      );
-    } catch (error) {
-      localStorage.setItem(
-        "treenote-backup-restore-result",
-        JSON.stringify({ ok: false, error: String(error), at: Date.now() }),
-      );
-    }
-  }, []);
+  const handleBackupRestoreRequest = useCallback(
+    async (timestamp: number, createBackupFirst: boolean, progressId: string) => {
+      try {
+        await textPanelRef.current?.flushPendingEdit();
+        await invoke("restore_notebook_from_backup", {
+          timestamp,
+          createBackupFirst,
+          progressId,
+        });
+        setSelectedNodeId(null);
+        setIsTreeFilterEnabled(false);
+        setTreeFocusNodeIds(null);
+        setRawMatchingNodeIdsSet(null);
+        setReloadKey((key) => key + 1);
+        localStorage.setItem(
+          "treenote-backup-restore-result",
+          JSON.stringify({ ok: true, timestamp, createBackupFirst, at: Date.now() }),
+        );
+      } catch (error) {
+        localStorage.setItem(
+          "treenote-backup-restore-result",
+          JSON.stringify({ ok: false, error: String(error), at: Date.now() }),
+        );
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     void Promise.all([invoke<{ password_configured: boolean }>("security_status"), invoke<{ editor_font_family: string }>("get_settings")])
@@ -169,9 +177,17 @@ function App() {
       }
       if (event.key === "treenote-backup-restore-request" && event.newValue) {
         try {
-          const request = JSON.parse(event.newValue) as { timestamp?: number };
+          const request = JSON.parse(event.newValue) as {
+            timestamp?: number;
+            createBackupFirst?: boolean;
+            progressId?: string;
+          };
           if (typeof request.timestamp === "number") {
-            void handleBackupRestoreRequest(request.timestamp);
+            void handleBackupRestoreRequest(
+              request.timestamp,
+              request.createBackupFirst ?? true,
+              request.progressId ?? createFlushRequestId(),
+            );
           }
         } catch {
           localStorage.setItem(
