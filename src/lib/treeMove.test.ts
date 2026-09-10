@@ -14,8 +14,14 @@ const items: FlatMoveItem[] = [
   { value: "grand-1", parentValue: "child-1" },
 ];
 
+const abc: FlatMoveItem[] = [
+  { value: "A", parentValue: undefined },
+  { value: "B", parentValue: undefined },
+  { value: "C", parentValue: undefined },
+];
+
 describe("buildInsertBeforeMove", () => {
-  it("inserts before a sibling within the same parent", () => {
+  it("moves a sibling upward within the same parent", () => {
     const result = buildInsertBeforeMove(items, "child-2", "child-1");
     expect(result).not.toBeNull();
     expect(result?.parentId).toBe("root-a");
@@ -29,7 +35,47 @@ describe("buildInsertBeforeMove", () => {
     ]);
   });
 
-  it("moves a subtree to become a root sibling before another root", () => {
+  it("moves a sibling downward within the same parent", () => {
+    const result = buildInsertBeforeMove(abc, "A", "C");
+    expect(result).not.toBeNull();
+    expect(result?.parentId).toBeNull();
+    expect(result?.sortOrder).toBe(1);
+    expect(result?.items.map((item) => item.value)).toEqual(["B", "A", "C"]);
+  });
+
+  it("returns null for an adjacent true no-op", () => {
+    expect(buildInsertBeforeMove(abc, "A", "B")).toBeNull();
+    expect(buildInsertBeforeMove(items, "child-1", "child-2")).toBeNull();
+  });
+
+  it("allows a non-adjacent downward move", () => {
+    const four: FlatMoveItem[] = [
+      { value: "A", parentValue: undefined },
+      { value: "B", parentValue: undefined },
+      { value: "C", parentValue: undefined },
+      { value: "D", parentValue: undefined },
+    ];
+    const result = buildInsertBeforeMove(four, "A", "D");
+    expect(result).not.toBeNull();
+    expect(result?.sortOrder).toBe(2);
+    expect(result?.items.map((item) => item.value)).toEqual(["B", "C", "A", "D"]);
+  });
+
+  it("inserts across parents", () => {
+    const result = buildInsertBeforeMove(items, "root-b", "child-2");
+    expect(result).not.toBeNull();
+    expect(result?.parentId).toBe("root-a");
+    expect(result?.sortOrder).toBe(1);
+    expect(result?.items.map((item) => item.value)).toEqual([
+      "root-a",
+      "child-1",
+      "root-b",
+      "child-2",
+      "grand-1",
+    ]);
+  });
+
+  it("outdents a subtree to a root sibling slot", () => {
     const result = buildInsertBeforeMove(items, "child-1", "root-b");
     expect(result).not.toBeNull();
     expect(result?.parentId).toBeNull();
@@ -43,12 +89,35 @@ describe("buildInsertBeforeMove", () => {
     ]);
   });
 
-  it("rejects inserting before a descendant", () => {
-    expect(buildInsertBeforeMove(items, "root-a", "grand-1")).toBeNull();
+  it("preserves subtree internal order when moving", () => {
+    const nested: FlatMoveItem[] = [
+      { value: "root-a", parentValue: undefined },
+      { value: "child-1", parentValue: "root-a" },
+      { value: "grand-1", parentValue: "child-1" },
+      { value: "great-1", parentValue: "grand-1" },
+      { value: "grand-2", parentValue: "child-1" },
+      { value: "root-b", parentValue: undefined },
+    ];
+    const result = buildInsertBeforeMove(nested, "child-1", "root-b");
+    expect(result).not.toBeNull();
+    const ids = result?.items.map((item) => item.value) ?? [];
+    const start = ids.indexOf("child-1");
+    expect(ids.slice(start, start + 4)).toEqual([
+      "child-1",
+      "grand-1",
+      "great-1",
+      "grand-2",
+    ]);
+    expect(result?.items.find((item) => item.value === "grand-1")?.parentValue).toBe(
+      "child-1",
+    );
+    expect(result?.items.find((item) => item.value === "great-1")?.parentValue).toBe(
+      "grand-1",
+    );
   });
 
-  it("returns null for a no-op adjacent move", () => {
-    expect(buildInsertBeforeMove(items, "child-1", "child-2")).toBeNull();
+  it("rejects inserting before a descendant", () => {
+    expect(buildInsertBeforeMove(items, "root-a", "grand-1")).toBeNull();
   });
 });
 

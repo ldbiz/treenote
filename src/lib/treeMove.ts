@@ -191,8 +191,7 @@ export const buildInsertBeforeMove = (
   if (oldParent === newParentValue) {
     const i = siblingIndex(prevItems, activeId);
     if (i < 0) return null;
-    if (j === i || j === i + 1) return null;
-    sortOrder = j > i ? j - 1 : j;
+    if (j === i) return null;
   }
 
   const updatedActiveItem = {

@@ -1040,6 +1040,12 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       setActiveSubtreeIds(new Set());
     }, []);
 
+    const releaseClickSuppression = useCallback(() => {
+      requestAnimationFrame(() => {
+        suppressClickAfterDragRef.current = false;
+      });
+    }, []);
+
     const handleDragOver = useCallback((event: DragOverEvent) => {
       const { over } = event;
       if (!over) {
@@ -1170,19 +1176,18 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
 
     const handleDragCancel = useCallback(() => {
       clearDragState();
-    }, [clearDragState]);
+      releaseClickSuppression();
+    }, [clearDragState, releaseClickSuppression]);
 
     const handleDragEndWithCleanup = useCallback(
       async (event: DragEndEvent) => {
         try {
           await handleDragEnd(event);
         } finally {
-          requestAnimationFrame(() => {
-            suppressClickAfterDragRef.current = false;
-          });
+          releaseClickSuppression();
         }
       },
-      [handleDragEnd]
+      [handleDragEnd, releaseClickSuppression]
     );
 
     // --- Move Up/Down Logic (for keyboard or toolbar) ---
