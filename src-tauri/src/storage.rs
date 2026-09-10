@@ -1498,8 +1498,36 @@ pub fn delete_node(id: String) -> Result<(), String> {
     delete_node_in_conn(&mut conn, &id).map_err(|e| e.to_string())
 }
 
+fn child_ids_in_order(
+    tx: &rusqlite::Transaction<'_>,
+    parent_id: Option<&str>,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt =
+        tx.prepare("SELECT id FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC, rowid ASC")?;
+    let ids = stmt
+        .query_map(params![parent_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
+/// Rewrite `sort_order` as a dense 0..n-1 sequence in the given order.
+fn write_child_order(tx: &rusqlite::Transaction<'_>, ids: &[String]) -> rusqlite::Result<()> {
+    for (position, child_id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE notes SET sort_order = ?1 WHERE id = ?2",
+            params![position as i64, child_id],
+        )?;
+    }
+    Ok(())
+}
+
 fn delete_node_in_conn(conn: &mut Connection, id: &str) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
+    let parent_id: Option<String> = tx.query_row(
+        "SELECT parent_id FROM notes WHERE id=?1",
+        params![id],
+        |r| r.get(0),
+    )?;
     let deleted = tx.execute(
         "WITH RECURSIVE descendants(id) AS (
             SELECT id FROM notes WHERE id=?1
@@ -1514,6 +1542,10 @@ fn delete_node_in_conn(conn: &mut Connection, id: &str) -> rusqlite::Result<()> 
     if deleted == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows);
     }
+    // Close the hole left behind, otherwise sort_order develops gaps and a
+    // position-based move lands in the wrong slot.
+    let siblings = child_ids_in_order(&tx, parent_id.as_deref())?;
+    write_child_order(&tx, &siblings)?;
     tx.commit()?;
     Ok(())
 }
@@ -1533,11 +1565,11 @@ fn move_node_in_conn(
     new_sort_order: i64,
 ) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let (old_parent_id, old_sort_order): (Option<String>, i64) = tx
+    let old_parent_id: Option<String> = tx
         .query_row(
-            "SELECT parent_id, sort_order FROM notes WHERE id=?1",
+            "SELECT parent_id FROM notes WHERE id=?1",
             params![id.clone()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
 
@@ -1572,45 +1604,27 @@ fn move_node_in_conn(
         return Err(depth_limit_move_message());
     }
 
-    if old_parent_id == new_parent_id {
-        if old_sort_order < new_sort_order {
-            tx.execute(
-                "UPDATE notes SET sort_order = sort_order - 1 \
-                 WHERE parent_id IS ?1 AND sort_order > ?2 AND sort_order <= ?3 AND id != ?4",
-                params![new_parent_id.as_ref(), old_sort_order, new_sort_order, id],
-            )
-            .map_err(|e| e.to_string())?;
-        } else if old_sort_order > new_sort_order {
-            tx.execute(
-                "UPDATE notes SET sort_order = sort_order + 1 \
-                 WHERE parent_id IS ?1 AND sort_order >= ?2 AND sort_order < ?3 AND id != ?4",
-                params![new_parent_id.as_ref(), new_sort_order, old_sort_order, id],
-            )
-            .map_err(|e| e.to_string())?;
-        }
+    // `new_sort_order` is a position among the destination's children, not a
+    // stored sort_order value. Rebuild the sibling order and rewrite it as a
+    // dense sequence rather than doing arithmetic on values that may have gaps.
+    if old_parent_id != new_parent_id {
+        tx.execute(
+            "UPDATE notes SET parent_id=?1 WHERE id=?2",
+            params![new_parent_id, id],
+        )
+        .map_err(|e| e.to_string())?;
 
-        tx.execute(
-            "UPDATE notes SET sort_order = ?1 WHERE id = ?2",
-            params![new_sort_order, id],
-        )
-        .map_err(|e| e.to_string())?;
-    } else {
-        tx.execute(
-            "UPDATE notes SET sort_order=sort_order-1 WHERE parent_id IS ?1 AND sort_order>?2",
-            params![old_parent_id.as_ref(), old_sort_order],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE notes SET sort_order=sort_order+1 WHERE parent_id IS ?1 AND sort_order>=?2",
-            params![new_parent_id.as_ref(), new_sort_order],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE notes SET parent_id=?1, sort_order=?2 WHERE id=?3",
-            params![new_parent_id, new_sort_order, id],
-        )
-        .map_err(|e| e.to_string())?;
+        let remaining = child_ids_in_order(&tx, old_parent_id.as_deref())
+            .map_err(|e| e.to_string())?;
+        write_child_order(&tx, &remaining).map_err(|e| e.to_string())?;
     }
+
+    let mut siblings =
+        child_ids_in_order(&tx, new_parent_id.as_deref()).map_err(|e| e.to_string())?;
+    siblings.retain(|child| child != &id);
+    let position = new_sort_order.clamp(0, siblings.len() as i64) as usize;
+    siblings.insert(position, id.clone());
+    write_child_order(&tx, &siblings).map_err(|e| e.to_string())?;
 
     tx.commit().map_err(|e| e.to_string())
 }
@@ -2077,6 +2091,139 @@ mod tests {
         assert_eq!(siblings, vec![("b".to_string(), 0), ("a".to_string(), 1)]);
     }
 
+    fn ordered_siblings(conn: &Connection, parent_id: Option<&str>) -> Vec<(String, i64)> {
+        conn.prepare(
+            "SELECT id, sort_order FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC",
+        )
+        .expect("prepare")
+        .query_map(params![parent_id], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))
+        .expect("query")
+        .filter_map(Result::ok)
+        .collect()
+    }
+
+    #[test]
+    fn move_node_insert_before_same_parent_moving_down() {
+        let mut conn = setup_test_conn();
+        insert_test_node(&conn, "root", None, "Root", 0, "");
+        insert_test_node(&conn, "n0", Some("root"), "N0", 0, "");
+        insert_test_node(&conn, "n1", Some("root"), "N1", 1, "");
+        insert_test_node(&conn, "n2", Some("root"), "N2", 2, "");
+
+        move_node_in_conn(&mut conn, "n2".into(), Some("root".into()), 0)
+            .expect("insert before moving down");
+
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![
+                ("n2".to_string(), 0),
+                ("n0".to_string(), 1),
+                ("n1".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn move_node_insert_before_same_parent_moving_up() {
+        let mut conn = setup_test_conn();
+        insert_test_node(&conn, "root", None, "Root", 0, "");
+        insert_test_node(&conn, "n0", Some("root"), "N0", 0, "");
+        insert_test_node(&conn, "n1", Some("root"), "N1", 1, "");
+        insert_test_node(&conn, "n2", Some("root"), "N2", 2, "");
+
+        move_node_in_conn(&mut conn, "n0".into(), Some("root".into()), 1)
+            .expect("insert before moving up");
+
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![
+                ("n1".to_string(), 0),
+                ("n0".to_string(), 1),
+                ("n2".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn move_node_uses_visual_position_when_sort_orders_have_gaps() {
+        let mut conn = setup_test_conn();
+        insert_test_node(&conn, "root", None, "Root", 0, "");
+        insert_test_node(&conn, "n0", Some("root"), "N0", 0, "");
+        insert_test_node(&conn, "n1", Some("root"), "N1", 4, "");
+        insert_test_node(&conn, "n2", Some("root"), "N2", 9, "");
+        insert_test_node(&conn, "n3", Some("root"), "N3", 15, "");
+
+        // Position 2 means visually between n1 and n2. It must not be
+        // interpreted as the literal persisted sort_order value 2.
+        move_node_in_conn(&mut conn, "n3".into(), Some("root".into()), 2)
+            .expect("move into visual slot");
+
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![
+                ("n0".to_string(), 0),
+                ("n1".to_string(), 1),
+                ("n3".to_string(), 2),
+                ("n2".to_string(), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn move_node_insert_before_cross_parent_into_middle() {
+        let mut conn = setup_test_conn();
+        setup_move_test_tree(&conn);
+
+        move_node_in_conn(&mut conn, "a1".into(), Some("root".into()), 1)
+            .expect("cross-parent insert");
+
+        let a1_parent: Option<String> = conn
+            .query_row("SELECT parent_id FROM notes WHERE id='a1'", [], |r| r.get(0))
+            .expect("a1 parent");
+        assert_eq!(a1_parent, Some("root".to_string()));
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![
+                ("a".to_string(), 0),
+                ("a1".to_string(), 1),
+                ("b".to_string(), 2),
+            ]
+        );
+        assert_eq!(ordered_siblings(&conn, Some("a")), Vec::<(String, i64)>::new());
+    }
+
+    #[test]
+    fn move_node_insert_before_outdent_to_root_middle() {
+        let mut conn = setup_test_conn();
+        insert_test_node(&conn, "root", None, "Root", 0, "");
+        insert_test_node(&conn, "r0", Some("root"), "R0", 0, "");
+        insert_test_node(&conn, "r1", Some("root"), "R1", 1, "");
+        insert_test_node(&conn, "r2", Some("root"), "R2", 2, "");
+        insert_test_node(&conn, "branch", Some("r0"), "Branch", 0, "");
+        insert_test_node(&conn, "leaf", Some("branch"), "Leaf", 0, "");
+
+        move_node_in_conn(&mut conn, "leaf".into(), Some("root".into()), 1)
+            .expect("outdent to root middle");
+
+        let leaf_parent: Option<String> = conn
+            .query_row("SELECT parent_id FROM notes WHERE id='leaf'", [], |r| r.get(0))
+            .expect("leaf parent");
+        assert_eq!(leaf_parent, Some("root".to_string()));
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![
+                ("r0".to_string(), 0),
+                ("leaf".to_string(), 1),
+                ("r1".to_string(), 2),
+                ("r2".to_string(), 3),
+            ]
+        );
+        assert_eq!(
+            ordered_siblings(&conn, Some("branch")),
+            Vec::<(String, i64)>::new()
+        );
+    }
+
     fn insert_level_chain(conn: &Connection, count: i64, prefix: &str) -> String {
         let mut parent: Option<String> = None;
         let mut last = String::new();
@@ -2145,6 +2292,10 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
         assert_eq!(remaining, vec!["other".to_string(), "root".to_string()]);
+        assert_eq!(
+            ordered_siblings(&conn, Some("root")),
+            vec![("other".to_string(), 0)]
+        );
     }
 
     #[test]

@@ -21,15 +21,29 @@ import {
   DndContext,
   PointerSensor,
   UniqueIdentifier,
-  closestCenter,
   useSensor,
   useSensors,
   useDraggable,
   useDroppable,
   DragEndEvent,
+  DragOverEvent,
   DragStartEvent,
+  DragOverlay,
 } from "@dnd-kit/core";
-import { CSS } from "@dnd-kit/utilities";
+import { createPortal } from "react-dom";
+import {
+  buildInsertBeforeMove,
+  buildReparentMove,
+  buildSiblingReorderMove,
+  getAllDescendants,
+} from "../lib/treeMove";
+import {
+  ROOT_DROP_AREA_ID,
+  beforeDropId,
+  createTreeDropCollision,
+  isBeforeDropId,
+  nodeIdFromBeforeDropId,
+} from "../lib/treeDropTarget";
 import {
   getInitialTree,
   TreeNodeData,
@@ -186,7 +200,12 @@ const EXPAND_ICON_SELECTOR = ".fui-TreeItemLayout__expandIcon";
 const isExpandIconTarget = (target: EventTarget | null): boolean =>
   target instanceof HTMLElement && !!target.closest(EXPAND_ICON_SELECTOR);
 
-// Tree item that supports selection and drag-and-drop
+type TreeDropTarget =
+  | { mode: "onto"; nodeId: UniqueIdentifier }
+  | { mode: "before"; nodeId: UniqueIdentifier }
+  | { mode: "root" }
+  | null;
+
 const SelectableDraggableFlatTreeItem = ({
   children,
   value,
@@ -207,6 +226,9 @@ const SelectableDraggableFlatTreeItem = ({
   onNodeContextMenu,
   renameRequestId,
   onRenameRequestHandled,
+  dropOnto = false,
+  dropBefore = false,
+  isAnyDragging = false,
   ...rest
 }: FlatTreeItemProps & {
   layout: string;
@@ -227,6 +249,9 @@ const SelectableDraggableFlatTreeItem = ({
   allNodesWithSearchMatches: Set<string> | null; // Changed from optional to required: Set<string> | null
   searchQuery?: string; // Add searchQuery prop for label highlighting
   reloadKey?: number;
+  dropOnto?: boolean;
+  dropBefore?: boolean;
+  isAnyDragging?: boolean;
 }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(layout);
@@ -242,15 +267,18 @@ const SelectableDraggableFlatTreeItem = ({
     attributes,
     listeners,
     setNodeRef: setDraggableNodeRef,
-    transform,
     isDragging,
   } = useDraggable({
     id: value as UniqueIdentifier,
     disabled: !isDraggableProp || isRenaming,
   });
-  const { setNodeRef: setDroppableNodeRef } = useDroppable({
+  const { setNodeRef: setDroppableNodeRef, isOver } = useDroppable({
     id: value as UniqueIdentifier,
-    disabled: false, // Always allow dropping on all nodes
+    disabled: false,
+  });
+  const { setNodeRef: setBeforeDropRef } = useDroppable({
+    id: beforeDropId(value as UniqueIdentifier),
+    disabled: false,
   });
 
   // Combine drag and drop refs
@@ -388,10 +416,8 @@ const SelectableDraggableFlatTreeItem = ({
       : 1;
 
   const style = {
-    transform: CSS.Transform.toString(transform),
-    opacity: isDragging ? 0.5 : 1,
-    zIndex: isDragging ? 1 : 0,
-    position: "relative",
+    opacity: isDragging ? 0.35 : 1,
+    position: "relative" as const,
     cursor: isRenaming ? "default" : isDragging ? "grabbing" : "default",
     touchAction: "none",
     ["--fluent-TreeItem--level"]: String(indentLevel),
@@ -590,13 +616,26 @@ const SelectableDraggableFlatTreeItem = ({
       }}
     >
       {renderGuides()}
+      <span
+        ref={setBeforeDropRef}
+        className={`tree-drop-before${dropBefore ? " tree-drop-before-active" : ""}`}
+        aria-hidden="true"
+      />
       <TreeItemLayout
         className={hasChildren ? "tree-item-branch" : undefined}
         style={{
-          boxShadow: isActuallySelected && !isRenaming
-            ? "inset 2px 0 0 var(--accent)"
-            : undefined,
-          backgroundColor: isActuallySelected && !isRenaming ? "var(--accent-bg)" : undefined,
+          boxShadow:
+            isActuallySelected && !isRenaming
+              ? "inset 2px 0 0 var(--accent)"
+              : dropOnto || isOver
+                ? "inset 0 0 0 1px var(--accent)"
+                : undefined,
+          backgroundColor:
+            isActuallySelected && !isRenaming
+              ? "var(--accent-bg)"
+              : dropOnto || isOver
+                ? "var(--hover)"
+                : undefined,
           fontWeight: isActuallySelected && !isRenaming ? 500 : undefined,
           userSelect: isRenaming ? "text" : "none",
           WebkitUserSelect: isRenaming ? "text" : "none",
@@ -616,7 +655,7 @@ const SelectableDraggableFlatTreeItem = ({
           });
         }}
         onClick={(e) => {
-          if (suppressClickAfterDragRef.current || transform || isRenaming) {
+          if (suppressClickAfterDragRef.current || isDragging || isRenaming) {
             if (isRenaming) e.stopPropagation();
             return;
           }
@@ -699,222 +738,17 @@ interface TreeComponentHandle {
   getAllNodeIdsRecursive: () => string[];
 }
 
-// Returns true if itemId is a descendant of parentId in the flat list
-const isDescendant = (
-  itemId: UniqueIdentifier,
-  parentId: UniqueIdentifier,
-  items: FlatItem[]
-): boolean => {
-  const itemMap = new Map(items.map((i) => [i.value, i]));
-  let current = itemMap.get(itemId);
-  while (current?.parentValue) {
-    if (current.parentValue === parentId) {
-      return true;
-    }
-    current = itemMap.get(current.parentValue);
-  }
-  return false;
-};
-
-// Gets all descendants of a node by its ID
-const getAllDescendants = (
-  nodeId: UniqueIdentifier,
-  items: FlatItem[]
-): Map<UniqueIdentifier, FlatItem> => {
-  const descendants = new Map<UniqueIdentifier, FlatItem>();
-
-  // Start with direct children
-  const directChildren = items.filter((item) => item.parentValue === nodeId);
-
-  // Add each child and recursively find their descendants
-  directChildren.forEach((child) => {
-    descendants.set(child.value, child);
-    const childDescendants = getAllDescendants(child.value, items);
-    childDescendants.forEach((descendant, id) => {
-      descendants.set(id, descendant);
-    });
-  });
-
-  return descendants;
-};
-
-// Count existing siblings under a parent (undefined parentValue = root level)
-const countSiblings = (
-  items: FlatItem[],
-  parentValue: UniqueIdentifier | undefined
-): number => {
-  return items.filter((item) => item.parentValue === parentValue).length;
-};
-
-type ReparentMoveResult = {
-  items: FlatItem[];
-  sortOrder: number;
-  openParentId?: UniqueIdentifier;
-};
-
-const buildReparentMove = (
-  prevItems: FlatItem[],
-  activeId: UniqueIdentifier,
-  newParentValue: UniqueIdentifier | undefined
-): ReparentMoveResult | null => {
-  const activeItem = prevItems.find((item) => item.value === activeId);
-  if (!activeItem) return null;
-
-  if (
-    newParentValue !== undefined &&
-    isDescendant(newParentValue, activeId, prevItems)
-  ) {
-    return null;
-  }
-
-  const activeItemDescendants = getAllDescendants(activeId, prevItems);
-  const itemsWithoutActiveTree = prevItems.filter(
-    (item) =>
-      item.value !== activeId &&
-      !activeItemDescendants.has(item.value as UniqueIdentifier)
-  );
-
-  const updatedActiveItem = {
-    ...activeItem,
-    parentValue: newParentValue,
-  };
-
-  let nextItems: FlatItem[];
-  let openParentId: UniqueIdentifier | undefined;
-
-  if (newParentValue === undefined) {
-    nextItems = [
-      ...itemsWithoutActiveTree,
-      updatedActiveItem,
-      ...Array.from(activeItemDescendants).map(([_, item]) => item),
-    ];
-  } else {
-    const overIndex = itemsWithoutActiveTree.findIndex(
-      (item) => item.value === newParentValue
-    );
-    if (overIndex === -1) return null;
-
-    let lastChildIndex = -1;
-    for (let i = overIndex + 1; i < itemsWithoutActiveTree.length; i++) {
-      const currentItem = itemsWithoutActiveTree[i];
-      if (currentItem.parentValue !== newParentValue) {
-        break;
-      }
-      lastChildIndex = i;
-    }
-
-    const insertionIndex =
-      lastChildIndex !== -1 ? lastChildIndex + 1 : overIndex + 1;
-
-    nextItems = [
-      ...itemsWithoutActiveTree.slice(0, insertionIndex),
-      updatedActiveItem,
-      ...Array.from(activeItemDescendants).map(([_, item]) => item),
-      ...itemsWithoutActiveTree.slice(insertionIndex),
-    ];
-    openParentId = newParentValue;
-  }
-
-  return {
-    items: nextItems,
-    sortOrder: countSiblings(itemsWithoutActiveTree, newParentValue),
-    openParentId,
-  };
-};
-
-type SiblingReorderResult = {
-  items: FlatItem[];
-  parentId: string | null;
-  sortOrder: number;
-};
-
-// Reorders a node among its siblings (including root-level nodes)
-const buildSiblingReorderMove = (
-  prevItems: FlatItem[],
-  id: string,
-  direction: "up" | "down"
-): SiblingReorderResult | null => {
-  const currentIndex = prevItems.findIndex((item) => item.value === id);
-  if (currentIndex === -1) return null;
-
-  const currentItem = prevItems[currentIndex];
-
-  const siblings = prevItems.filter(
-    (item) => item.parentValue === currentItem.parentValue
-  );
-  const siblingIndex = siblings.findIndex((item) => item.value === id);
-
-  let targetSiblingIndex = -1;
-  if (direction === "up" && siblingIndex > 0) {
-    targetSiblingIndex = siblingIndex - 1;
-  } else if (direction === "down" && siblingIndex < siblings.length - 1) {
-    targetSiblingIndex = siblingIndex + 1;
-  }
-
-  if (targetSiblingIndex === -1) return null;
-
-  const targetSiblingValue = siblings[targetSiblingIndex].value;
-  const newSortOrder = targetSiblingIndex;
-
-  const nodeDescendants = getAllDescendants(id, prevItems);
-  const descendantIds = new Set(
-    Array.from(nodeDescendants.keys()) as UniqueIdentifier[]
-  );
-
-  const itemsToMove = prevItems.filter(
-    (item) =>
-      item.value === id || descendantIds.has(item.value as UniqueIdentifier)
-  );
-
-  const newItems = prevItems.filter(
-    (item) =>
-      item.value !== id && !descendantIds.has(item.value as UniqueIdentifier)
-  );
-
-  const targetIdxInNew = newItems.findIndex(
-    (item) => item.value === targetSiblingValue
-  );
-  if (targetIdxInNew === -1) return null;
-
-  const targetDescendants = getAllDescendants(
-    targetSiblingValue,
-    newItems
-  );
-  const targetSubtreeLen = 1 + targetDescendants.size;
-
-  const insertionIndex =
-    direction === "up"
-      ? targetIdxInNew
-      : targetIdxInNew + targetSubtreeLen;
-
-  newItems.splice(insertionIndex, 0, ...itemsToMove);
-
-  const parentValue = currentItem.parentValue;
-
-  return {
-    items: newItems,
-    parentId:
-      parentValue === undefined ? null : String(parentValue),
-    sortOrder: newSortOrder,
-  };
-};
-
-// Helper function to find the ultimate root ancestor of a node
 const findRootAncestor = (
   itemId: UniqueIdentifier,
-  items: FlatItem[]
+  items: FlatItem[],
 ): FlatItem | undefined => {
-  const itemMap = new Map(items.map((i) => [i.value, i]));
+  const itemMap = new Map(items.map((item) => [item.value, item]));
   let current = itemMap.get(itemId);
   while (current?.parentValue) {
     const parent = itemMap.get(current.parentValue);
-    if (!parent) {
-      // Should not happen in a consistent tree, but handle defensively
-      return undefined;
-    }
-    current = parent; // Move up to the parent
+    if (!parent) return undefined;
+    current = parent;
   }
-  // When parentValue is undefined, 'current' is the root ancestor
   return current;
 };
 
@@ -973,6 +807,12 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
     const initialOpen = useRef(new Set<UniqueIdentifier>()).current; // Store initial open state
     const [treeData, setTreeData] = useState<OriginalTreeNodeData[]>([]); // Store original tree
     const suppressClickAfterDragRef = useRef(false);
+    const [activeDragId, setActiveDragId] = useState<UniqueIdentifier | null>(null);
+    const [activeDragLabel, setActiveDragLabel] = useState("");
+    const [dropTarget, setDropTarget] = useState<TreeDropTarget>(null);
+    const [activeSubtreeIds, setActiveSubtreeIds] = useState<Set<string>>(
+      () => new Set(),
+    );
     const [contextMenu, setContextMenu] = useState<{
       nodeId: string;
       x: number;
@@ -1196,54 +1036,90 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
     const sensors = useSensors(
       useSensor(PointerSensor, {
         activationConstraint: {
-          distance: 5, // Small drag threshold to avoid accidental drags
+          distance: 5,
         },
-      })
+      }),
     );
 
-    // Handles drag end: moves item if valid
+    const collisionDetection = useMemo(
+      () => createTreeDropCollision(activeSubtreeIds),
+      [activeSubtreeIds],
+    );
+
+    const clearDragState = useCallback(() => {
+      setActiveDragId(null);
+      setActiveDragLabel("");
+      setDropTarget(null);
+      setActiveSubtreeIds(new Set());
+    }, []);
+
+    const releaseClickSuppression = useCallback(() => {
+      requestAnimationFrame(() => {
+        suppressClickAfterDragRef.current = false;
+      });
+    }, []);
+
+    const handleDragOver = useCallback((event: DragOverEvent) => {
+      const { over } = event;
+      if (!over) {
+        setDropTarget(null);
+        return;
+      }
+      if (over.id === ROOT_DROP_AREA_ID) {
+        setDropTarget({ mode: "root" });
+        return;
+      }
+      if (isBeforeDropId(over.id)) {
+        setDropTarget({ mode: "before", nodeId: nodeIdFromBeforeDropId(over.id) });
+        return;
+      }
+      setDropTarget({ mode: "onto", nodeId: over.id });
+    }, []);
+
     const handleDragEnd = useCallback(
       async (event: DragEndEvent) => {
         const { active, over } = event;
+        clearDragState();
         if (!active?.id) return;
         const activeNodeExists = items.some((item) => item.value === active.id);
         if (!activeNodeExists) {
           console.warn(`DragEnd: Active node ${active.id} not found in items.`);
           return;
         }
+        if (!over) return;
 
         let nextOpenItems = new Set(openItems);
         let moveSucceeded = false;
 
-        if (over && active.id !== over.id && over.id !== "root-drop-area") {
-          const targetNodeExists = items.some((item) => item.value === over.id);
-          if (!targetNodeExists) {
-            console.warn(`DragEnd: Target node ${over.id} not found in items.`);
-            return;
-          }
-
-          if (wouldExceedMaxLevel(items, active.id, over.id)) {
+        if (isBeforeDropId(over.id)) {
+          const referenceId = nodeIdFromBeforeDropId(over.id);
+          const referenceItem = items.find((item) => item.value === referenceId);
+          if (!referenceItem) return;
+          if (
+            wouldExceedMaxLevel(
+              items,
+              active.id,
+              referenceItem.parentValue ?? null,
+            )
+          ) {
             await showMessage(DEPTH_LIMIT_MOVE_MESSAGE, {
               title: "Move note",
               kind: "warning",
             });
             return;
           }
-
-          const movePlan = buildReparentMove(items, active.id, over.id);
+          const movePlan = buildInsertBeforeMove(items, active.id, referenceId);
           if (!movePlan) return;
-
-          setItems(movePlan.items);
+          setItems(movePlan.items as FlatItem[]);
           if (movePlan.openParentId && !nextOpenItems.has(movePlan.openParentId)) {
             nextOpenItems = new Set(nextOpenItems).add(movePlan.openParentId);
           }
-
           moveSucceeded = await moveNode(
             String(active.id),
-            String(over.id),
-            movePlan.sortOrder
+            movePlan.parentId,
+            movePlan.sortOrder,
           );
-        } else if (active.id && (!over || over.id === "root-drop-area")) {
+        } else if (over.id === ROOT_DROP_AREA_ID) {
           if (wouldExceedMaxLevel(items, active.id, null)) {
             await showMessage(DEPTH_LIMIT_MOVE_MESSAGE, {
               title: "Move note",
@@ -1251,15 +1127,37 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             });
             return;
           }
-
           const movePlan = buildReparentMove(items, active.id, undefined);
           if (!movePlan) return;
-
-          setItems(movePlan.items);
+          setItems(movePlan.items as FlatItem[]);
           moveSucceeded = await moveNode(
             String(active.id),
             null,
-            movePlan.sortOrder
+            movePlan.sortOrder,
+          );
+        } else if (active.id !== over.id) {
+          const targetNodeExists = items.some((item) => item.value === over.id);
+          if (!targetNodeExists) {
+            console.warn(`DragEnd: Target node ${over.id} not found in items.`);
+            return;
+          }
+          if (wouldExceedMaxLevel(items, active.id, over.id)) {
+            await showMessage(DEPTH_LIMIT_MOVE_MESSAGE, {
+              title: "Move note",
+              kind: "warning",
+            });
+            return;
+          }
+          const movePlan = buildReparentMove(items, active.id, over.id);
+          if (!movePlan) return;
+          setItems(movePlan.items as FlatItem[]);
+          if (movePlan.openParentId && !nextOpenItems.has(movePlan.openParentId)) {
+            nextOpenItems = new Set(nextOpenItems).add(movePlan.openParentId);
+          }
+          moveSucceeded = await moveNode(
+            String(active.id),
+            String(over.id),
+            movePlan.sortOrder,
           );
         }
 
@@ -1269,24 +1167,40 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           await reloadTreeFromBackend(openItems);
         }
       },
-      [items, openItems, reloadTreeFromBackend]
+      [items, openItems, reloadTreeFromBackend, clearDragState],
     );
 
-    const handleDragStart = useCallback((_event: DragStartEvent) => {
-      suppressClickAfterDragRef.current = true;
-    }, []);
+    const handleDragStart = useCallback(
+      (event: DragStartEvent) => {
+        suppressClickAfterDragRef.current = true;
+        const id = event.active.id;
+        setActiveDragId(id);
+        const dragged = items.find((item) => item.value === id);
+        setActiveDragLabel(dragged?.layout ?? "Note");
+        const descendants = getAllDescendants(id, items);
+        const excluded = new Set<string>([String(id)]);
+        descendants.forEach((_, descendantId) => {
+          excluded.add(String(descendantId));
+        });
+        setActiveSubtreeIds(excluded);
+      },
+      [items],
+    );
+
+    const handleDragCancel = useCallback(() => {
+      clearDragState();
+      releaseClickSuppression();
+    }, [clearDragState, releaseClickSuppression]);
 
     const handleDragEndWithCleanup = useCallback(
       async (event: DragEndEvent) => {
         try {
           await handleDragEnd(event);
         } finally {
-          requestAnimationFrame(() => {
-            suppressClickAfterDragRef.current = false;
-          });
+          releaseClickSuppression();
         }
       },
-      [handleDragEnd]
+      [handleDragEnd, releaseClickSuppression]
     );
 
     // --- Move Up/Down Logic (for keyboard or toolbar) ---
@@ -1295,7 +1209,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         const plan = buildSiblingReorderMove(items, id, direction);
         if (!plan) return;
 
-        setItems(plan.items);
+        setItems(plan.items as FlatItem[]);
 
         const moveSucceeded = await moveNode(id, plan.parentId, plan.sortOrder);
         if (moveSucceeded) {
@@ -1727,14 +1641,19 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           width: "100%",
         }}
       >
-        <div ref={treeScrollerRef} className="tree-scroller">
+        <div
+          ref={treeScrollerRef}
+          className={`tree-scroller${activeDragId ? " tree-scroller-dragging" : ""}`}
+        >
           <DndContext
             sensors={sensors}
-            collisionDetection={closestCenter}
+            collisionDetection={collisionDetection}
             onDragStart={handleDragStart}
+            onDragOver={handleDragOver}
+            onDragCancel={handleDragCancel}
             onDragEnd={handleDragEndWithCleanup}
           >
-            <DropArea id="root-drop-area">
+            <DropArea id={ROOT_DROP_AREA_ID}>
               <div
                 style={{
                   height: "100%",
@@ -1781,6 +1700,15 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                         allNodesWithSearchMatches={allNodesWithSearchMatches}
                         searchQuery={searchQuery}
                         suppressClickAfterDragRef={suppressClickAfterDragRef}
+                        dropOnto={
+                          dropTarget?.mode === "onto" &&
+                          dropTarget.nodeId === allGeneratedProps.value
+                        }
+                        dropBefore={
+                          dropTarget?.mode === "before" &&
+                          dropTarget.nodeId === allGeneratedProps.value
+                        }
+                        isAnyDragging={activeDragId !== null}
                         guide={guideMap.get(allGeneratedProps.value)}
                         onNodeContextMenu={handleNodeContextMenu}
                         renameRequestId={renameRequestId}
@@ -1791,6 +1719,19 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                 </FlatTree>
               </div>
             </DropArea>
+            {/* The overlay is position: fixed, so it must not live inside an
+                ancestor that creates a containing block for fixed elements
+                (.tree-panel sets a transform). Portalling to the body keeps
+                its coordinates — and the collision rect dnd-kit derives from
+                them — in the viewport space the pointer is measured in. */}
+            {createPortal(
+              <DragOverlay dropAnimation={null}>
+                {activeDragId ? (
+                  <div className="tree-drag-overlay">{activeDragLabel}</div>
+                ) : null}
+              </DragOverlay>,
+              document.body,
+            )}
           </DndContext>
           <NodeContextMenu
             open={contextMenu !== null}
