@@ -59,7 +59,7 @@ npm run tauri:build
 
 The script finds `ISCC.exe` on `PATH` or in standard install locations. For a custom location, set `ISCC_PATH` to the full compiler path first.
 
-The script builds the Tauri app first, then writes the installer to `dist/installer/treenote-0.1.0-setup.exe`.
+The script builds the Tauri app first, then writes the installer to `dist/installer/treenote-0.2.0-setup.exe`.
 
 ## Releasing
 

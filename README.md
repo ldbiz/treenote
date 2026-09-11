@@ -17,7 +17,7 @@ Built with Tauri and SQLite. See [DEVELOPERS.md](DEVELOPERS.md) for technical de
 ## Install
 
 1. Open the latest [GitHub release](https://github.com/ldbiz/treenote/releases).
-2. Download **treenote-0.1.0-setup.exe**.
+2. Download **treenote-0.2.0-setup.exe**.
 3. Run the installer. Installation is per-user and does not need administrator access.
 
 After setup, TreeNote is in the Start Menu. The installer can also add a desktop shortcut. TreeNote keeps its settings, notebooks and backups together in one data folder. The default is TreeNote's AppData folder, and a different data folder can be chosen during first setup.
