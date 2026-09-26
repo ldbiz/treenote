@@ -1,3 +1,19 @@
+/** Keys handled by the app tree keyboard listener (capture). Fluent TreeItem must not also handle these. */
+export const TREE_APP_KEYBOARD_KEYS = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+  "Enter",
+  "Delete",
+  "Tab",
+  " ",
+]);
+
 export type TreeKeyboardItemMeta = {
   parentId: string | null;
   hasChildren: boolean;

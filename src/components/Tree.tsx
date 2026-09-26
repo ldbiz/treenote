@@ -61,6 +61,7 @@ import { isContextMenuKey } from "./popupMenu";
 import {
   computeTreePageSize,
   resolveTreeKeyboardAction,
+  TREE_APP_KEYBOARD_KEYS,
   type TreeKeyboardItemMeta,
 } from "../lib/treeKeyboard";
 import { cancelTreeFocus, focusTreeNode } from "../lib/treeFocus";
@@ -75,6 +76,7 @@ import {
   nodeLevel,
   wouldExceedMaxLevel,
 } from "../lib/treeDepth";
+import { isChevronAreaInteraction } from "../lib/treeExpandHit";
 
 // --- Data Structures ---
 
@@ -195,16 +197,52 @@ const buildGuideMap = (
 
 // --- Components ---
 
-const EXPAND_ICON_SELECTOR = ".fui-TreeItemLayout__expandIcon";
-
-const isExpandIconTarget = (target: EventTarget | null): boolean =>
-  target instanceof HTMLElement && !!target.closest(EXPAND_ICON_SELECTOR);
-
 type TreeDropTarget =
   | { mode: "onto"; nodeId: UniqueIdentifier }
   | { mode: "before"; nodeId: UniqueIdentifier }
   | { mode: "root" }
   | null;
+
+function treeItemLayoutFromEvent(
+  target: EventTarget | null,
+  currentTarget: EventTarget | null,
+): HTMLElement | null {
+  if (
+    currentTarget instanceof HTMLElement &&
+    currentTarget.classList.contains("fui-TreeItemLayout")
+  ) {
+    return currentTarget;
+  }
+  if (target instanceof HTMLElement) {
+    const layout = target.closest(".fui-TreeItemLayout");
+    if (layout instanceof HTMLElement) return layout;
+  }
+  return null;
+}
+
+function isChevronPointer(
+  event: {
+    target: EventTarget | null;
+    clientX: number;
+    clientY: number;
+    currentTarget: EventTarget | null;
+  },
+  hasChildren: boolean,
+  level: number,
+): boolean {
+  const layoutRoot = treeItemLayoutFromEvent(
+    event.target,
+    event.currentTarget,
+  );
+  return isChevronAreaInteraction(
+    event.target,
+    event.clientX,
+    event.clientY,
+    layoutRoot,
+    hasChildren,
+    level,
+  );
+}
 
 const SelectableDraggableFlatTreeItem = ({
   children,
@@ -300,7 +338,7 @@ const SelectableDraggableFlatTreeItem = ({
   // Handle mouse down: start timer for long press
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLElement>) => {
-      if (e.button !== 0 || isRenaming || isExpandIconTarget(e.target)) return;
+      if (e.button !== 0 || isRenaming || isChevronPointer(e, hasChildren, indentLevel)) return;
 
       clearLongPressTimer();
       hasMoved.current = false;
@@ -318,7 +356,7 @@ const SelectableDraggableFlatTreeItem = ({
         startPos.current = null;
       }, 500);
     },
-    [clearLongPressTimer, isRenaming, layout]
+    [clearLongPressTimer, isRenaming, layout, hasChildren, indentLevel]
   );
 
   // Handle mouse move: clear timer if moved significantly
@@ -431,14 +469,27 @@ const SelectableDraggableFlatTreeItem = ({
     for (const [eventName, handler] of Object.entries(listeners)) {
       if (eventName === "onKeyDown" || eventName === "onKeyUp") continue;
       filtered[eventName] = (event: Event) => {
-        if (isExpandIconTarget(event.target)) return;
+        if (
+          isChevronPointer(
+            {
+              target: event.target,
+              clientX: (event as MouseEvent).clientX,
+              clientY: (event as MouseEvent).clientY,
+              currentTarget: event.currentTarget,
+            },
+            hasChildren,
+            indentLevel,
+          )
+        ) {
+          return;
+        }
         if (typeof handler === "function") {
           handler(event);
         }
       };
     }
     return filtered;
-  }, [isDraggableProp, isRenaming, listeners]);
+  }, [isDraggableProp, isRenaming, listeners, hasChildren, indentLevel]);
 
   // Updated text color logic
   let itemTextColor = "var(--text-muted)"; // Default: muted grey for unselected
@@ -595,7 +646,12 @@ const SelectableDraggableFlatTreeItem = ({
         }
       }}
       onKeyDown={(e) => {
-        rest.onKeyDown?.(e);
+        if (e.defaultPrevented || isRenaming) return;
+        // Navigation keys are handled in capture on document (processTreeKeyboard).
+        // Skip Fluent's TreeItem handler so Left/Right do not double-toggle open state.
+        if (!TREE_APP_KEYBOARD_KEYS.has(e.key)) {
+          rest.onKeyDown?.(e);
+        }
         if (e.defaultPrevented || isRenaming) return;
         if (e.key === "F2") {
           e.preventDefault();
@@ -646,7 +702,7 @@ const SelectableDraggableFlatTreeItem = ({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onContextMenu={(e) => {
-          if (isRenaming || isExpandIconTarget(e.target)) return;
+          if (isRenaming || isChevronPointer(e, hasChildren, indentLevel)) return;
           e.preventDefault();
           e.stopPropagation();
           onNodeContextMenu?.(value as string, {
@@ -671,10 +727,9 @@ const SelectableDraggableFlatTreeItem = ({
             return;
           }
 
-          // Handle expand/collapse here (and stop propagation) so Fluent's
-          // TreeItem click handler never runs — otherwise row + chevron clicks
-          // can toggle twice and appear to do nothing.
-          if (isExpandIconTarget(target)) {
+          // Chevron toggles here with propagation stopped so Fluent's TreeItem
+          // handler does not run (avoids double toggle). Row click selects only.
+          if (isChevronPointer(e, hasChildren, indentLevel)) {
             if (hasChildren) {
               onToggleOpen();
             }
@@ -684,9 +739,6 @@ const SelectableDraggableFlatTreeItem = ({
           }
 
           onNodeSelect(value as string);
-          if (hasChildren) {
-            onToggleOpen();
-          }
           focusTreeNode(value as string);
           e.preventDefault();
           e.stopPropagation();
@@ -1338,9 +1390,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             break;
           case "toggleOpen":
             toggleNodeOpen(action.id);
-            if (!active?.closest('[role="treeitem"]')) {
-              focusTreeNode(action.id);
-            }
+            focusTreeNode(action.id);
             break;
           case "delete":
             onDeleteNode(action.id);
