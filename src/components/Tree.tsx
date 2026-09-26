@@ -672,9 +672,6 @@ const SelectableDraggableFlatTreeItem = ({
           }
 
           onNodeSelect(value as string);
-          if (hasChildren) {
-            onToggleOpen();
-          }
           focusTreeNode(value as string);
           e.stopPropagation();
         }}
