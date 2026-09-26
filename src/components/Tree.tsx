@@ -325,6 +325,11 @@ const SelectableDraggableFlatTreeItem = ({
     setDroppableNodeRef(node);
   };
 
+  const indentLevel =
+    typeof rest["aria-level"] === "number" && rest["aria-level"] >= 1
+      ? rest["aria-level"]
+      : 1;
+
   // --- Rename Logic ---
 
   // Clear the long press timer
@@ -448,11 +453,6 @@ const SelectableDraggableFlatTreeItem = ({
   // Fluent only pre-generates indent classes for levels 1–10. Levels 11+
   // need --fluent-TreeItem--level on the row. Set it here as a unitless
   // string so our drag `style` cannot replace Fluent's fallback.
-  const indentLevel =
-    typeof rest["aria-level"] === "number" && rest["aria-level"] >= 1
-      ? rest["aria-level"]
-      : 1;
-
   const style = {
     opacity: isDragging ? 0.35 : 1,
     position: "relative" as const,
