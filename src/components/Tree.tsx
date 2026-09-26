@@ -667,12 +667,28 @@ const SelectableDraggableFlatTreeItem = ({
           }
 
           const target = e.target as HTMLElement;
-          if (isExpandIconTarget(target) || target.closest("input")) {
+          if (target.closest("input")) {
+            return;
+          }
+
+          // Handle expand/collapse here (and stop propagation) so Fluent's
+          // TreeItem click handler never runs — otherwise row + chevron clicks
+          // can toggle twice and appear to do nothing.
+          if (isExpandIconTarget(target)) {
+            if (hasChildren) {
+              onToggleOpen();
+            }
+            e.preventDefault();
+            e.stopPropagation();
             return;
           }
 
           onNodeSelect(value as string);
+          if (hasChildren) {
+            onToggleOpen();
+          }
           focusTreeNode(value as string);
+          e.preventDefault();
           e.stopPropagation();
         }}
         draggable={false}
