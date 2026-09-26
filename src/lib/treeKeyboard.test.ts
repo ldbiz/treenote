@@ -184,4 +184,35 @@ describe("resolveTreeKeyboardAction", () => {
     expect(action({ key: " " })).toEqual({ type: "suppress" });
     expect(action({ key: " ", currentId: null })).toEqual({ type: "suppress" });
   });
+
+  it("ArrowLeft/Right expand/collapse only when chevron would (not on row select)", () => {
+    // Open branch: Left collapses (toggle), does not move selection.
+    expect(action({ key: "ArrowLeft", currentId: "root" })).toEqual({
+      type: "toggleOpen",
+      id: "root",
+    });
+    // Open branch: Right moves to first child (select), does not collapse.
+    expect(action({ key: "ArrowRight", currentId: "root" })).toEqual({
+      type: "select",
+      id: "child-a",
+    });
+    // Closed branch: Right expands (toggle).
+    const closedChildB = meta([
+      ["root", { parentId: null, hasChildren: true, isOpen: true }],
+      ["child-b", { parentId: "root", hasChildren: true, isOpen: false }],
+    ]);
+    expect(
+      resolveTreeKeyboardAction({
+        visibleIds: ["root", "child-b"],
+        itemMeta: closedChildB,
+        currentId: "child-b",
+        pageSize: 2,
+        key: "ArrowRight",
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        shiftKey: false,
+      }),
+    ).toEqual({ type: "toggleOpen", id: "child-b" });
+  });
 });

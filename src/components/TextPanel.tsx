@@ -119,6 +119,23 @@ const TextPanel = forwardRef<TextPanelHandle, TextPanelProps>(({
   } | null>(null);
   const searchGenerationRef = useRef(0);
 
+  useEffect(() => {
+    const handleFindShortcut = (event: KeyboardEvent) => {
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        event.key.toLowerCase() === "f"
+      ) {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+
+    window.addEventListener("keydown", handleFindShortcut);
+    return () => window.removeEventListener("keydown", handleFindShortcut);
+  }, []);
+
   const flushPendingEdit = useCallback(async () => {
     try {
       await sessionRef.current.flush();
@@ -192,7 +209,6 @@ const TextPanel = forwardRef<TextPanelHandle, TextPanelProps>(({
   const displayHighlightedContent =
     isSearching &&
     activeSearchQuery.trim() !== "" &&
-    isTreeFilterActive &&
     selectedNodeId &&
     nodeSpecificResults.length > 0 &&
     hasContentMatches &&
@@ -627,14 +643,10 @@ const TextPanel = forwardRef<TextPanelHandle, TextPanelProps>(({
   const prevFilterActiveRef = useRef(isTreeFilterActive);
   useEffect(() => {
     const wasJustEnabled = isTreeFilterActive && !prevFilterActiveRef.current;
-    const wasJustDisabled = !isTreeFilterActive && prevFilterActiveRef.current;
     prevFilterActiveRef.current = isTreeFilterActive;
 
     if (wasJustEnabled && searchQuery.trim()) {
       performSearch();
-    } else if (wasJustDisabled) {
-      exitHighlightingMode();
-      setCurrentHitIndex(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isTreeFilterActive]);
