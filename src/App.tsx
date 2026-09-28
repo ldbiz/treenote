@@ -709,10 +709,10 @@ function App() {
                 focusNodeIds={treeFocusNodeIds}
                 isTreeCurrentlyFiltered={isTreeCurrentlyFilteredReal}
                 allNodesWithSearchMatches={
-                  isTreeCurrentlyFilteredReal ? rawMatchingNodeIdsSet : null
+                  activeSearchOverall ? rawMatchingNodeIdsSet : null
                 }
                 searchQuery={
-                  isTreeCurrentlyFilteredReal ? currentSearchQueryInPanel : ""
+                  activeSearchOverall ? currentSearchQueryInPanel : ""
                 }
               />
             )}
