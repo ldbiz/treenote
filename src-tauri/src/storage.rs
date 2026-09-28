@@ -1951,7 +1951,7 @@ fn duplicate_node_in_conn(conn: &mut Connection, id: &str) -> rusqlite::Result<T
     })
 }
 
-fn export_single_branchfn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportNode> {
+fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportNode> {
     let (node_id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at): (
         String,
         Option<String>,
