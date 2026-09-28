@@ -885,7 +885,7 @@ fn export_nodes(conn: &Connection, parent_id: Option<&str>) -> rusqlite::Result<
     Ok(out)
 }
 
-pub fn fetch_notebook_export_treepub fn fetch_notebook_export_tree(
+pub fn fetch_notebook_export_tree(
 ) -> Result<Vec<crate::convert::treenote_json::TreenoteJsonNode>, String> {
     let conn = db_connection()?;
     crate::convert::treenote_json::build_tree_from_connection(&conn)
@@ -1472,7 +1472,7 @@ fn fetch_nodes_recursive(
     iter.collect()
 }
 
-const MAX_TREE_LEVELconst MAX_TREE_LEVEL: i64 = 20;
+const MAX_TREE_LEVEL: i64 = 20;
 
 fn depth_limit_add_message() -> String {
     format!(
@@ -1610,7 +1610,7 @@ pub fn update_node(id: String, new_label: String) -> Result<(), String> {
     update_node_in_conn(&conn, &id, &new_label)
 }
 
-pub fn delete_nodepub fn delete_node(id: String) -> Result<(), String> {
+pub fn delete_node(id: String) -> Result<(), String> {
     let mut conn = db_connection()?;
     delete_node_in_conn(&mut conn, &id).map_err(|e| e.to_string())
 }
@@ -1786,7 +1786,7 @@ pub fn get_node(id: String) -> Result<TreeNode, String> {
     .map_err(|e| e.to_string())
 }
 
-pub fn update_node_contentfn update_node_content_in_conn(conn: &Connection, id: &str, content: &str) -> Result<(), String> {
+fn update_node_content_in_conn(conn: &Connection, id: &str, content: &str) -> Result<(), String> {
     let changed = conn
         .execute(
             "UPDATE notes SET content=?1, modified_at=?2 WHERE id=?3 AND COALESCE(content,'')<>?1",
@@ -1830,7 +1830,6 @@ pub fn set_node_archived(id: String, archived: bool) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone)]
-struct SubtreeNodeRow#[derive(Debug, Clone)]
 struct SubtreeNodeRow {
     id: String,
     parent_id: Option<String>,
@@ -1995,7 +1994,7 @@ fn export_single_branchfn export_single_branch(conn: &Connection, id: &str) -> r
     })
 }
 
-fn write_branch_exportfn write_branch_export(conn: &Connection, id: &str, path: &str) -> Result<String, String> {
+fn write_branch_export(conn: &Connection, id: &str, path: &str) -> Result<String, String> {
     let branch = export_single_branch(conn, id).map_err(|e| e.to_string())?;
     if let Some(parent) = Path::new(path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
