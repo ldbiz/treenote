@@ -907,14 +907,6 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       return formatSubtreeStats(count, item.parentValue === undefined);
     }, [contextMenu, items]);
 
-    const contextMenuArchiveLabel = useMemo(() => {
-      if (!contextMenu) return null;
-      const item = items.find((entry) => entry.value === contextMenu.nodeId);
-      if (!item) return null;
-      if (item.archivedAt != null) return "Unarchive" as const;
-      if (item.isEffectivelyArchived) return null;
-      return parentIds.has(item.value) ? ("Archive branch" as const) : ("Archive" as const);
-    }, [contextMenu, items, parentIds]);
 
     const reloadTreeFromBackend = useCallback(
       async (preserveOpenItems: Set<UniqueIdentifier>) => {
@@ -943,6 +935,15 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       });
       return ids;
     }, [items]);
+
+    const contextMenuArchiveLabel = useMemo(() => {
+      if (!contextMenu) return null;
+      const item = items.find((entry) => entry.value === contextMenu.nodeId);
+      if (!item) return null;
+      if (item.archivedAt != null) return "Unarchive" as const;
+      if (item.isEffectivelyArchived) return null;
+      return parentIds.has(item.value) ? ("Archive branch" as const) : ("Archive" as const);
+    }, [contextMenu, items, parentIds]);
 
     const toggleNodeOpen = useCallback((id: UniqueIdentifier) => {
       setOpenItems((prevOpen) => {
