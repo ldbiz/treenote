@@ -74,6 +74,11 @@ fn delete_node(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_node_archived(id: String, archived: bool) -> Result<(), String> {
+    storage::set_node_archived(id, archived)
+}
+
+#[tauri::command]
 fn move_node(id: String, new_parent_id: Option<String>, new_sort_order: i64) -> Result<(), String> {
     storage::move_node(id, new_parent_id, new_sort_order)
 }
@@ -464,6 +469,7 @@ fn main() {
             add_node,
             update_node,
             delete_node,
+            set_node_archived,
             move_node,
             get_node_content,
             update_node_content,
