@@ -963,8 +963,25 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
 
     // Determine the items to display in the FlatTree
     const displayItemsForFlatTree = useMemo(() => {
+      const archivedSearchPathIds = new Set<UniqueIdentifier>();
+      if (allNodesWithSearchMatches) {
+        allNodesWithSearchMatches.forEach((matchId) => {
+          const match = itemMap.get(matchId);
+          if (!match?.isEffectivelyArchived) return;
+          archivedSearchPathIds.add(match.value);
+          let currentParentValue = match.parentValue;
+          while (currentParentValue) {
+            const parentItem = itemMap.get(currentParentValue);
+            if (!parentItem) break;
+            archivedSearchPathIds.add(parentItem.value);
+            currentParentValue = parentItem.parentValue;
+          }
+        });
+      }
+
       if (isTreeCurrentlyFiltered && focusNodeIds && focusNodeIds.size > 0) {
-        // Filtering is ON and there are matches: show only direct matches and their ancestors
+        // Filtering is ON and there are matches: show direct matches and their
+        // ancestors, while keeping unrelated archived branches hidden.
         const ancestorChainNodeIds = new Set<UniqueIdentifier>();
         focusNodeIds.forEach((directMatchId) => {
           let currentParentValue = itemMap.get(directMatchId)?.parentValue;
@@ -985,64 +1002,29 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         ]);
 
         return items
-          .filter((item) => {
-            if (!allVisibleNodeIds.has(item.value)) return false;
-            if (!item.isEffectivelyArchived) return true;
-            // An archived ancestor is only revealed when the search path actually
-            // leads to an archived match; unrelated archived branches stay hidden.
-            let current: FlatItem | undefined = item;
-            while (current) {
-              if (focusNodeIds.has(String(current.value))) return true;
-              const childOnPath = items.find(
-                (candidate) =>
-                  candidate.parentValue === current!.value &&
-                  allVisibleNodeIds.has(candidate.value)
-              );
-              if (!childOnPath) break;
-              current = childOnPath;
-            }
-            return false;
-          })
+          .filter(
+            (item) =>
+              allVisibleNodeIds.has(item.value) &&
+              (!item.isEffectivelyArchived || archivedSearchPathIds.has(item.value))
+          )
           .map((item) => ({
             ...item,
-            // isDirectMatch is true if this item is one of the primary filter targets
             isDirectMatchForFilter: focusNodeIds.has(String(item.value)),
           }));
-      } else {
-        // Archived nodes remain in the complete model for search. During an active
-        // search, reveal matching archived notes plus their ancestor path even when
-        // the user's "Filter tree" checkbox is off. Otherwise hide archived branches.
-        if (allNodesWithSearchMatches && allNodesWithSearchMatches.size > 0) {
-          const archivedSearchIds = new Set<UniqueIdentifier>();
-          allNodesWithSearchMatches.forEach((matchId) => {
-            const match = itemMap.get(matchId);
-            if (!match?.isEffectivelyArchived) return;
-            archivedSearchIds.add(match.value);
-            let currentParentValue = match.parentValue;
-            while (currentParentValue) {
-              const parentItem = itemMap.get(currentParentValue);
-              if (!parentItem) break;
-              archivedSearchIds.add(parentItem.value);
-              currentParentValue = parentItem.parentValue;
-            }
-          });
-          return items
-            .filter(
-              (item) =>
-                !item.isEffectivelyArchived || archivedSearchIds.has(item.value)
-            )
-            .map((item) => ({
-              ...item,
-              isDirectMatchForFilter: allNodesWithSearchMatches.has(String(item.value)),
-            }));
-        }
-        return items
-          .filter((item) => !item.isEffectivelyArchived)
-          .map((item) => ({
-            ...item,
-            isDirectMatchForFilter: false,
-          }));
       }
+
+      // Outside filtered mode, active notes stay visible and archived content is
+      // revealed only along paths to archived search matches.
+      return items
+        .filter(
+          (item) =>
+            !item.isEffectivelyArchived || archivedSearchPathIds.has(item.value)
+        )
+        .map((item) => ({
+          ...item,
+          isDirectMatchForFilter:
+            allNodesWithSearchMatches?.has(String(item.value)) ?? false,
+        }));
     }, [
       items,
       focusNodeIds,
