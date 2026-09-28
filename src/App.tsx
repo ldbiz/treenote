@@ -593,8 +593,7 @@ function App() {
   // Search always reveals matching archived paths; the checkbox still controls
   // whether active notes are reduced to matches/ancestors during a normal search.
   const isTreeCurrentlyFilteredReal =
-    activeSearchOverall &&
-    (isTreeFilterEnabled || (rawMatchingNodeIdsSet?.size ?? 0) > 0);
+    isTreeFilterEnabled && activeSearchOverall;
   const pendingDeleteIsTree =
     pendingDeleteId !== null &&
     treeRef.current?.getParentId(pendingDeleteId) === null;
