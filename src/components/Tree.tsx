@@ -988,8 +988,33 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             isDirectMatchForFilter: focusNodeIds.has(String(item.value)),
           }));
       } else {
-        // Outside search/filter mode, explicitly archived roots and all inherited
-        // descendants stay in the complete model but are hidden from the normal tree.
+        // Archived nodes remain in the complete model for search. During an active
+        // search, reveal matching archived notes plus their ancestor path even when
+        // the user's "Filter tree" checkbox is off. Otherwise hide archived branches.
+        if (allNodesWithSearchMatches && allNodesWithSearchMatches.size > 0) {
+          const archivedSearchIds = new Set<UniqueIdentifier>();
+          allNodesWithSearchMatches.forEach((matchId) => {
+            const match = itemMap.get(matchId);
+            if (!match?.isEffectivelyArchived) return;
+            archivedSearchIds.add(match.value);
+            let currentParentValue = match.parentValue;
+            while (currentParentValue) {
+              const parentItem = itemMap.get(currentParentValue);
+              if (!parentItem) break;
+              archivedSearchIds.add(parentItem.value);
+              currentParentValue = parentItem.parentValue;
+            }
+          });
+          return items
+            .filter(
+              (item) =>
+                !item.isEffectivelyArchived || archivedSearchIds.has(item.value)
+            )
+            .map((item) => ({
+              ...item,
+              isDirectMatchForFilter: allNodesWithSearchMatches.has(String(item.value)),
+            }));
+        }
         return items
           .filter((item) => !item.isEffectivelyArchived)
           .map((item) => ({
@@ -997,7 +1022,13 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             isDirectMatchForFilter: false,
           }));
       }
-    }, [items, focusNodeIds, isTreeCurrentlyFiltered, itemMap]);
+    }, [
+      items,
+      focusNodeIds,
+      isTreeCurrentlyFiltered,
+      itemMap,
+      allNodesWithSearchMatches,
+    ]);
 
     const flatTree = useHeadlessFlatTree_unstable(displayItemsForFlatTree, {
       openItems,
