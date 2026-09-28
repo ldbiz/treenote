@@ -270,6 +270,7 @@ const SelectableDraggableFlatTreeItem = ({
   isDirectMatchForFilter, // New: Is this a direct match WHEN filtering is active?
   isFilterModeActive, // New: Is the tree filter UI active AND has found matches?
   isTreeCurrentlyFiltered, // New: Is the tree visually filtering nodes?
+  isEffectivelyArchived,
   allNodesWithSearchMatches, // New: All nodes with matches, regardless of filtering
   searchQuery, // Add searchQuery prop for label highlighting
   suppressClickAfterDragRef,
@@ -297,6 +298,7 @@ const SelectableDraggableFlatTreeItem = ({
   isDirectMatchForFilter?: boolean; // New: Is this a direct match WHEN filtering is active?
   isFilterModeActive?: boolean; // New: Is the tree filter UI active AND has found matches?
   isTreeCurrentlyFiltered?: boolean; // New: Is the tree visually filtering nodes?
+  isEffectivelyArchived?: boolean;
   allNodesWithSearchMatches: Set<string> | null; // Changed from optional to required: Set<string> | null
   searchQuery?: string; // Add searchQuery prop for label highlighting
   reloadKey?: number;
@@ -706,6 +708,8 @@ const SelectableDraggableFlatTreeItem = ({
                 ? "var(--hover)"
                 : undefined,
           fontWeight: isActuallySelected && !isRenaming ? 500 : undefined,
+          fontStyle: isEffectivelyArchived ? "italic" : undefined,
+          opacity: isEffectivelyArchived ? 0.72 : undefined,
           userSelect: isRenaming ? "text" : "none",
           WebkitUserSelect: isRenaming ? "text" : "none",
           msUserSelect: isRenaming ? "text" : "none",
@@ -1830,6 +1834,9 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                         // Props for color logic (isDirectMatchForFilter is already in allGeneratedProps)
                         isFilterModeActive={isFilterModeActiveWithMatches}
                         isTreeCurrentlyFiltered={isTreeCurrentlyFiltered}
+                        isEffectivelyArchived={
+                          itemMap.get(allGeneratedProps.value)?.isEffectivelyArchived
+                        }
                         allNodesWithSearchMatches={allNodesWithSearchMatches}
                         searchQuery={searchQuery}
                         suppressClickAfterDragRef={suppressClickAfterDragRef}
