@@ -434,6 +434,7 @@ fn open_existing_notebook(path: &Path) -> Result<Connection, String> {
         return Err(format!("Notebook not found: {}", path.display()));
     }
     let conn = Connection::open(path).map_err(|e| format!("Failed to open notebook: {}", e))?;
+    validate_existing_notebook_schema(&conn)?;
     ensure_db_schema(&conn).map_err(|e| e.to_string())?;
     Ok(conn)
 }
