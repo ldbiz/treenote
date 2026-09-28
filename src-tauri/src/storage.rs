@@ -218,6 +218,9 @@ pub(crate) fn ensure_db_schema(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     if version < CURRENT_SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }
