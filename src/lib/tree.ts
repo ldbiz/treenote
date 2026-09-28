@@ -7,6 +7,9 @@ export interface TreeNodeData {
   children?: TreeNodeData[];
   isExpanded?: boolean;
   isDraggable?: boolean;
+  createdAt?: number | null;
+  modifiedAt?: number | null;
+  archivedAt?: number | null;
 }
 
 export async function getInitialTree(): Promise<TreeNodeData[]> {
@@ -77,6 +80,19 @@ export async function deleteNode(id: string): Promise<boolean> {
     return true;
   } catch (error) {
     console.error("Failed to delete node:", error);
+    return false;
+  }
+}
+
+export async function setNodeArchived(
+  id: string,
+  archived: boolean
+): Promise<boolean> {
+  try {
+    await invoke("set_node_archived", { id, archived });
+    return true;
+  } catch (error) {
+    console.error("Failed to update archive state:", error);
     return false;
   }
 }
