@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::backup::{
@@ -28,19 +28,22 @@ use crate::managed_notebook;
 use crate::notebook_lock::{self, NotebookLock};
 use crate::tree::TreeNode;
 
-const CREATE_NOTES_TABLE_SQL: &str = "
+pub(crate) const CREATE_NOTES_TABLE_SQL: &str = "
 CREATE TABLE IF NOT EXISTS notes (
     id TEXT PRIMARY KEY,
     parent_id TEXT,
     label TEXT NOT NULL,
     is_expanded INTEGER,
     sort_order INTEGER NOT NULL,
-    content TEXT
+    content TEXT,
+    created_at INTEGER,
+    modified_at INTEGER,
+    archived_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS notes_parent_id_idx ON notes(parent_id);";
 
 const NOTES_TABLE: &str = "notes";
-const NOTES_COLUMNS: &[&str] = &[
+const LEGACY_NOTES_COLUMNS: &[&str] = &[
     "id",
     "parent_id",
     "label",
@@ -48,6 +51,18 @@ const NOTES_COLUMNS: &[&str] = &[
     "sort_order",
     "content",
 ];
+const CURRENT_NOTES_COLUMNS: &[&str] = &[
+    "id",
+    "parent_id",
+    "label",
+    "is_expanded",
+    "sort_order",
+    "content",
+    "created_at",
+    "modified_at",
+    "archived_at",
+];
+const CURRENT_SCHEMA_VERSION: i64 = 1;
 
 const RESTORE_ATTACH_ALIAS: &str = "restore_src";
 
@@ -175,8 +190,38 @@ fn verify_password_hash(password: &str, encoded_hash: &str) -> Result<bool, Stri
         .is_ok())
 }
 
-fn ensure_db_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(CREATE_NOTES_TABLE_SQL)
+pub(crate) fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn schema_column_names(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map([], |row| row.get::<_, String>(1))?
+        .collect()
+}
+
+pub(crate) fn ensure_db_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(CREATE_NOTES_TABLE_SQL)?;
+    let columns = schema_column_names(conn, NOTES_TABLE)?;
+    for (name, sql) in [
+        ("created_at", "ALTER TABLE notes ADD COLUMN created_at INTEGER"),
+        ("modified_at", "ALTER TABLE notes ADD COLUMN modified_at INTEGER"),
+        ("archived_at", "ALTER TABLE notes ADD COLUMN archived_at INTEGER"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            conn.execute_batch(sql)?;
+        }
+    }
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < CURRENT_SCHEMA_VERSION {
+        conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+    }
+    Ok(())
 }
 
 fn default_settings_on(data_root: &Path) -> AppSettings {
@@ -361,7 +406,7 @@ fn validate_existing_notebook_schema(conn: &Connection) -> Result<(), String> {
         return Err("This file is not a TreeNote notebook.".into());
     }
     let columns = notes_column_names(conn, NOTES_TABLE)?;
-    for required in NOTES_COLUMNS {
+    for required in LEGACY_NOTES_COLUMNS {
         if !columns.iter().any(|c| c == required) {
             return Err("This file is not a TreeNote notebook.".into());
         }
@@ -378,8 +423,10 @@ fn open_notebook_for_recovery(path: &Path) -> Result<Connection, String> {
             .map_err(|e| format!("Failed to open notebook: {}", e))?;
         validate_existing_notebook_schema(&read_only)?;
     }
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(|e| format!("Failed to open notebook: {}", e))
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|e| format!("Failed to open notebook: {}", e))?;
+    ensure_db_schema(&conn).map_err(|e| e.to_string())?;
+    Ok(conn)
 }
 
 fn open_existing_notebook(path: &Path) -> Result<Connection, String> {
@@ -794,10 +841,16 @@ struct ExportNode {
     content: String,
     sort_order: i64,
     is_expanded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modified_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archived_at: Option<i64>,
     children: Vec<ExportNode>,
 }
 fn export_nodes(conn: &Connection, parent_id: Option<&str>) -> rusqlite::Result<Vec<ExportNode>> {
-    let mut stmt = conn.prepare("SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC")?;
+    let mut stmt = conn.prepare("SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded, created_at, modified_at, archived_at FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC")?;
     let rows = stmt.query_map(params![parent_id], |row| {
         let id: String = row.get(0)?;
         Ok((
@@ -807,11 +860,14 @@ fn export_nodes(conn: &Connection, parent_id: Option<&str>) -> rusqlite::Result<
             row.get(3)?,
             row.get(4)?,
             row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<i64>>(7)?,
+            row.get::<_, Option<i64>>(8)?,
         ))
     })?;
     let mut out = Vec::new();
     for r in rows {
-        let (id, parent_id, label, content, sort_order, expanded) = r?;
+        let (id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at) = r?;
         let children = export_nodes(conn, Some(&id))?;
         out.push(ExportNode {
             id,
@@ -820,13 +876,16 @@ fn export_nodes(conn: &Connection, parent_id: Option<&str>) -> rusqlite::Result<
             content,
             sort_order,
             is_expanded: expanded.map(|v| v == 1),
+            created_at,
+            modified_at,
+            archived_at,
             children,
         });
     }
     Ok(out)
 }
 
-pub fn fetch_notebook_export_tree(
+pub fn fetch_notebook_export_treepub fn fetch_notebook_export_tree(
 ) -> Result<Vec<crate::convert::treenote_json::TreenoteJsonNode>, String> {
     let conn = db_connection()?;
     crate::convert::treenote_json::build_tree_from_connection(&conn)
@@ -1193,14 +1252,7 @@ fn notes_table_exists(conn: &Connection) -> Result<bool, String> {
 }
 
 fn notes_column_names(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
-    let sql = format!("PRAGMA table_info({table})");
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let names = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(names)
+    schema_column_names(conn, table).map_err(|e| e.to_string())
 }
 
 fn validate_backup_notes_schema(conn: &Connection) -> Result<(), String> {
@@ -1208,7 +1260,7 @@ fn validate_backup_notes_schema(conn: &Connection) -> Result<(), String> {
         return Err("Backup does not contain a notes table".into());
     }
     let columns = notes_column_names(conn, NOTES_TABLE)?;
-    for required in NOTES_COLUMNS {
+    for required in LEGACY_NOTES_COLUMNS {
         if !columns.iter().any(|c| c == required) {
             return Err(format!(
                 "Backup is missing required notes column: {}",
@@ -1219,7 +1271,12 @@ fn validate_backup_notes_schema(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn restore_notes_from_backup(live: &Connection, backup_path: &Path) -> Result<(), String> {
+fn restore_notes_from_backup(
+    live: &Connection,
+    backup_path: &Path,
+    backup_columns: &[String],
+) -> Result<(), String> {
+    ensure_db_schema(live).map_err(|e| e.to_string())?;
     let backup_path_str = backup_path
         .to_string_lossy()
         .replace('\\', "/")
@@ -1228,10 +1285,21 @@ fn restore_notes_from_backup(live: &Connection, backup_path: &Path) -> Result<()
     live.execute_batch(&attach_sql)
         .map_err(|e| format!("Failed to attach backup: {}", e))?;
 
-    let column_list = NOTES_COLUMNS.join(", ");
+    let column_list = CURRENT_NOTES_COLUMNS.join(", ");
+    let select_list = CURRENT_NOTES_COLUMNS
+        .iter()
+        .map(|column| {
+            if backup_columns.iter().any(|candidate| candidate == column) {
+                (*column).to_string()
+            } else {
+                format!("NULL AS {column}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let insert_sql = format!(
         "INSERT INTO {NOTES_TABLE} ({column_list}) \
-         SELECT {column_list} FROM {RESTORE_ATTACH_ALIAS}.{NOTES_TABLE}"
+         SELECT {select_list} FROM {RESTORE_ATTACH_ALIAS}.{NOTES_TABLE}"
     );
 
     let result = (|| {
@@ -1262,7 +1330,8 @@ pub(crate) fn restore_notes_from_backup_path(
         Connection::open_with_flags(backup_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| format!("Failed to open backup: {}", e))?;
     validate_backup_notes_schema(&backup)?;
-    restore_notes_from_backup(live, backup_path)
+    let columns = notes_column_names(&backup, NOTES_TABLE)?;
+    restore_notes_from_backup(live, backup_path, &columns)
 }
 
 fn lock_state_preserving_backup(lock_state: LockState, timestamp: u64) -> LockState {
@@ -1380,7 +1449,7 @@ fn fetch_nodes_recursive(
     conn: &Connection,
     parent_id: Option<&str>,
 ) -> rusqlite::Result<Vec<TreeNode>> {
-    let mut stmt = conn.prepare("SELECT id, label, is_expanded, content FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC")?;
+    let mut stmt = conn.prepare("SELECT id, label, is_expanded, content, created_at, modified_at, archived_at FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC")?;
     let iter = stmt.query_map(params![parent_id], |row| {
         let id: String = row.get(0)?;
         let children = fetch_nodes_recursive(conn, Some(&id))?;
@@ -1395,12 +1464,15 @@ fn fetch_nodes_recursive(
             },
             is_draggable: None,
             content: row.get(3)?,
+            created_at: row.get(4)?,
+            modified_at: row.get(5)?,
+            archived_at: row.get(6)?,
         })
     })?;
     iter.collect()
 }
 
-const MAX_TREE_LEVEL: i64 = 20;
+const MAX_TREE_LEVELconst MAX_TREE_LEVEL: i64 = 20;
 
 fn depth_limit_add_message() -> String {
     format!(
@@ -1485,14 +1557,15 @@ fn add_node_in_conn(
         }
     }
     let id = Uuid::new_v4().to_string();
+    let now = now_millis();
     tx.execute(
         "UPDATE notes SET sort_order = sort_order + 1 WHERE parent_id IS ?1",
         params![parent_id.as_ref()],
     )
     .map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT INTO notes (id,parent_id,label,is_expanded,sort_order,content) VALUES (?1,?2,?3,1,0,'')",
-        params![id, parent_id, label],
+        "INSERT INTO notes (id,parent_id,label,is_expanded,sort_order,content,created_at,modified_at,archived_at) VALUES (?1,?2,?3,1,0,'',?4,?4,NULL)",
+        params![id, parent_id, label, now],
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -1503,18 +1576,41 @@ fn add_node_in_conn(
         children: None,
         is_draggable: None,
         content: Some(String::new()),
+        created_at: Some(now),
+        modified_at: Some(now),
+        archived_at: None,
     })
 }
-pub fn update_node(id: String, new_label: String) -> Result<(), String> {
-    db_connection()?
+
+fn note_exists(conn: &Connection, id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM notes WHERE id=?1)",
+        params![id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .map_err(|e| e.to_string())
+}
+
+fn update_node_in_conn(conn: &Connection, id: &str, new_label: &str) -> Result<(), String> {
+    let changed = conn
         .execute(
-            "UPDATE notes SET label=?1 WHERE id=?2",
-            params![new_label, id],
+            "UPDATE notes SET label=?1, modified_at=?2 WHERE id=?3 AND label<>?1",
+            params![new_label, now_millis(), id],
         )
         .map_err(|e| e.to_string())?;
+    if changed == 0 && !note_exists(conn, id)? {
+        return Err("Note not found".into());
+    }
     Ok(())
 }
-pub fn delete_node(id: String) -> Result<(), String> {
+
+pub fn update_node(id: String, new_label: String) -> Result<(), String> {
+    let conn = db_connection()?;
+    update_node_in_conn(&conn, &id, &new_label)
+}
+
+pub fn delete_nodepub fn delete_node(id: String) -> Result<(), String> {
     let mut conn = db_connection()?;
     delete_node_in_conn(&mut conn, &id).map_err(|e| e.to_string())
 }
@@ -1593,6 +1689,8 @@ fn move_node_in_conn(
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
+    let old_siblings =
+        child_ids_in_order(&tx, old_parent_id.as_deref()).map_err(|e| e.to_string())?;
 
     if let Some(ref parent_id) = new_parent_id {
         if old_parent_id != new_parent_id {
@@ -1645,7 +1743,15 @@ fn move_node_in_conn(
     siblings.retain(|child| child != &id);
     let position = new_sort_order.clamp(0, siblings.len() as i64) as usize;
     siblings.insert(position, id.clone());
+    let logically_moved = old_parent_id != new_parent_id || old_siblings != siblings;
     write_child_order(&tx, &siblings).map_err(|e| e.to_string())?;
+    if logically_moved {
+        tx.execute(
+            "UPDATE notes SET modified_at=?1 WHERE id=?2",
+            params![now_millis(), id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     tx.commit().map_err(|e| e.to_string())
 }
@@ -1661,7 +1767,7 @@ pub fn get_node_content(id: String) -> Result<String, String> {
 pub fn get_node(id: String) -> Result<TreeNode, String> {
     let conn = db_connection()?;
     conn.query_row(
-        "SELECT id,label,is_expanded,content FROM notes WHERE id=?1",
+        "SELECT id,label,is_expanded,content,created_at,modified_at,archived_at FROM notes WHERE id=?1",
         params![id],
         |r| {
             Ok(TreeNode {
@@ -1671,25 +1777,60 @@ pub fn get_node(id: String) -> Result<TreeNode, String> {
                 children: None,
                 is_draggable: None,
                 content: r.get(3)?,
+                created_at: r.get(4)?,
+                modified_at: r.get(5)?,
+                archived_at: r.get(6)?,
             })
         },
     )
     .map_err(|e| e.to_string())
 }
-pub fn update_node_content(id: String, content: String) -> Result<(), String> {
-    let changed = db_connection()?
+
+pub fn update_node_contentfn update_node_content_in_conn(conn: &Connection, id: &str, content: &str) -> Result<(), String> {
+    let changed = conn
         .execute(
-            "UPDATE notes SET content=?1 WHERE id=?2",
-            params![content, id],
+            "UPDATE notes SET content=?1, modified_at=?2 WHERE id=?3 AND COALESCE(content,'')<>?1",
+            params![content, now_millis(), id],
         )
         .map_err(|e| e.to_string())?;
-    if changed == 0 {
+    if changed == 0 && !note_exists(conn, id)? {
         return Err("Note not found".into());
     }
     Ok(())
 }
 
+pub fn update_node_content(id: String, content: String) -> Result<(), String> {
+    let conn = db_connection()?;
+    update_node_content_in_conn(&conn, &id, &content)
+}
+
+fn set_node_archived_in_conn(conn: &Connection, id: &str, archived: bool) -> Result<(), String> {
+    let now = now_millis();
+    let changed = if archived {
+        conn.execute(
+            "UPDATE notes SET archived_at=?1, modified_at=?1 WHERE id=?2 AND archived_at IS NULL",
+            params![now, id],
+        )
+    } else {
+        conn.execute(
+            "UPDATE notes SET archived_at=NULL, modified_at=?1 WHERE id=?2 AND archived_at IS NOT NULL",
+            params![now, id],
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    if changed == 0 && !note_exists(conn, id)? {
+        return Err("Note not found".into());
+    }
+    Ok(())
+}
+
+pub fn set_node_archived(id: String, archived: bool) -> Result<(), String> {
+    let conn = db_connection()?;
+    set_node_archived_in_conn(&conn, &id, archived)
+}
+
 #[derive(Debug, Clone)]
+struct SubtreeNodeRow#[derive(Debug, Clone)]
 struct SubtreeNodeRow {
     id: String,
     parent_id: Option<String>,
@@ -1757,6 +1898,7 @@ fn duplicate_node_in_conn(conn: &mut Connection, id: &str) -> rusqlite::Result<T
 
     let new_root_id = id_map[&source.id].clone();
     let new_root_sort_order = source.sort_order + 1;
+    let duplicated_at = now_millis();
 
     tx.execute(
         "UPDATE notes SET sort_order = sort_order + 1 \
@@ -1781,15 +1923,16 @@ fn duplicate_node_in_conn(conn: &mut Connection, id: &str) -> rusqlite::Result<T
             row.sort_order
         };
         tx.execute(
-            "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content, created_at, modified_at, archived_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL)",
             params![
                 new_id,
                 new_parent_id,
                 new_label,
                 row.is_expanded,
                 new_sort_order,
-                row.content
+                row.content,
+                duplicated_at
             ],
         )?;
     }
@@ -1803,19 +1946,25 @@ fn duplicate_node_in_conn(conn: &mut Connection, id: &str) -> rusqlite::Result<T
         children: None,
         is_draggable: None,
         content: Some(source.content.clone()),
+        created_at: Some(duplicated_at),
+        modified_at: Some(duplicated_at),
+        archived_at: None,
     })
 }
 
-fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportNode> {
-    let (node_id, parent_id, label, content, sort_order, expanded): (
+fn export_single_branchfn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportNode> {
+    let (node_id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at): (
         String,
         Option<String>,
         String,
         String,
         i64,
         Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
     ) = conn.query_row(
-        "SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded FROM notes WHERE id=?1",
+        "SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded, created_at, modified_at, archived_at FROM notes WHERE id=?1",
         params![id],
         |row| {
             Ok((
@@ -1825,6 +1974,9 @@ fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportN
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
             ))
         },
     )?;
@@ -1836,11 +1988,14 @@ fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportN
         content,
         sort_order,
         is_expanded: expanded.map(|v| v == 1),
+        created_at,
+        modified_at,
+        archived_at,
         children,
     })
 }
 
-fn write_branch_export(conn: &Connection, id: &str, path: &str) -> Result<String, String> {
+fn write_branch_exportfn write_branch_export(conn: &Connection, id: &str, path: &str) -> Result<String, String> {
     let branch = export_single_branch(conn, id).map_err(|e| e.to_string())?;
     if let Some(parent) = Path::new(path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -3454,4 +3609,261 @@ mod tests {
             LockState::Unavailable
         );
     }
+
+    #[test]
+    fn legacy_schema_migrates_without_fabricating_lifecycle_times() {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                label TEXT NOT NULL,
+                is_expanded INTEGER,
+                sort_order INTEGER NOT NULL,
+                content TEXT
+            );
+            INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content)
+            VALUES ('old', NULL, 'Old', 1, 0, 'body');",
+        )
+        .expect("legacy schema");
+
+        ensure_db_schema(&conn).expect("migrate");
+
+        let columns = schema_column_names(&conn, "notes").expect("columns");
+        for required in ["created_at", "modified_at", "archived_at"] {
+            assert!(columns.iter().any(|column| column == required));
+        }
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        let lifecycle: (Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes WHERE id='old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("lifecycle");
+        assert_eq!(lifecycle, (None, None, None));
+    }
+
+    #[test]
+    fn creation_and_noop_updates_follow_lifecycle_semantics() {
+        let mut conn = setup_test_conn();
+        let node = add_node_in_conn(&mut conn, None, "Note".into()).expect("add");
+        let (created, modified, archived): (Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes WHERE id=?1",
+                params![node.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("metadata");
+        assert!(created.is_some());
+        assert_eq!(created, modified);
+        assert_eq!(archived, None);
+
+        conn.execute(
+            "UPDATE notes SET modified_at=123 WHERE id=?1",
+            params![node.id],
+        )
+        .expect("seed modified");
+        update_node_in_conn(&conn, &node.id, "Note").expect("noop label");
+        update_node_content_in_conn(&conn, &node.id, "").expect("noop content");
+        let unchanged: i64 = conn
+            .query_row(
+                "SELECT modified_at FROM notes WHERE id=?1",
+                params![node.id],
+                |row| row.get(0),
+            )
+            .expect("unchanged");
+        assert_eq!(unchanged, 123);
+
+        update_node_in_conn(&conn, &node.id, "Renamed").expect("rename");
+        let renamed: i64 = conn
+            .query_row(
+                "SELECT modified_at FROM notes WHERE id=?1",
+                params![node.id],
+                |row| row.get(0),
+            )
+            .expect("renamed");
+        assert!(renamed > 123);
+
+        conn.execute(
+            "UPDATE notes SET modified_at=123 WHERE id=?1",
+            params![node.id],
+        )
+        .expect("reset modified");
+        update_node_content_in_conn(&conn, &node.id, "changed").expect("content");
+        let content_modified: i64 = conn
+            .query_row(
+                "SELECT modified_at FROM notes WHERE id=?1",
+                params![node.id],
+                |row| row.get(0),
+            )
+            .expect("content modified");
+        assert!(content_modified > 123);
+    }
+
+    #[test]
+    fn move_stamps_only_the_logically_moved_note() {
+        let mut conn = setup_test_conn();
+        insert_test_node(&conn, "p1", None, "P1", 0, "");
+        insert_test_node(&conn, "p2", None, "P2", 1, "");
+        insert_test_node(&conn, "a", Some("p1"), "A", 0, "");
+        insert_test_node(&conn, "b", Some("p1"), "B", 1, "");
+        conn.execute("UPDATE notes SET modified_at=10", []).expect("seed");
+
+        move_node_in_conn(&mut conn, "b".into(), Some("p2".into()), 0).expect("move");
+
+        let moved: i64 = conn
+            .query_row("SELECT modified_at FROM notes WHERE id='b'", [], |row| row.get(0))
+            .expect("moved");
+        assert!(moved > 10);
+        for id in ["p1", "p2", "a"] {
+            let value: i64 = conn
+                .query_row(
+                    "SELECT modified_at FROM notes WHERE id=?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("other");
+            assert_eq!(value, 10, "{id} should not be stamped");
+        }
+
+        conn.execute("UPDATE notes SET modified_at=10 WHERE id='b'", [])
+            .expect("reset");
+        move_node_in_conn(&mut conn, "b".into(), Some("p2".into()), 0).expect("noop move");
+        let noop: i64 = conn
+            .query_row("SELECT modified_at FROM notes WHERE id='b'", [], |row| row.get(0))
+            .expect("noop");
+        assert_eq!(noop, 10);
+    }
+
+    #[test]
+    fn archive_markers_are_explicit_and_nested_markers_survive_parent_unarchive() {
+        let conn = setup_test_conn();
+        insert_test_node(&conn, "a", None, "A", 0, "");
+        insert_test_node(&conn, "b", Some("a"), "B", 0, "");
+        insert_test_node(&conn, "c", Some("a"), "C", 1, "");
+        insert_test_node(&conn, "d", Some("c"), "D", 0, "");
+
+        set_node_archived_in_conn(&conn, "a", true).expect("archive a");
+        let child_marker: Option<i64> = conn
+            .query_row("SELECT archived_at FROM notes WHERE id='b'", [], |row| row.get(0))
+            .expect("child marker");
+        assert_eq!(child_marker, None);
+
+        set_node_archived_in_conn(&conn, "c", true).expect("archive c");
+        set_node_archived_in_conn(&conn, "a", false).expect("unarchive a");
+        let a_marker: Option<i64> = conn
+            .query_row("SELECT archived_at FROM notes WHERE id='a'", [], |row| row.get(0))
+            .expect("a marker");
+        let c_marker: Option<i64> = conn
+            .query_row("SELECT archived_at FROM notes WHERE id='c'", [], |row| row.get(0))
+            .expect("c marker");
+        assert_eq!(a_marker, None);
+        assert!(c_marker.is_some());
+    }
+
+    #[test]
+    fn duplicate_gets_fresh_lifecycle_and_clears_archive_markers() {
+        let mut conn = setup_test_conn();
+        insert_test_node(&conn, "root", None, "Root", 0, "root");
+        insert_test_node(&conn, "child", Some("root"), "Child", 0, "child");
+        conn.execute(
+            "UPDATE notes SET created_at=1, modified_at=2, archived_at=3",
+            [],
+        )
+        .expect("seed metadata");
+
+        let duplicate = duplicate_node_in_conn(&mut conn, "root").expect("duplicate");
+        let root_meta: (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes WHERE id=?1",
+                params![duplicate.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("root metadata");
+        assert!(root_meta.0 > 3);
+        assert_eq!(root_meta.0, root_meta.1);
+        assert_eq!(root_meta.2, None);
+
+        let child_meta: (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes WHERE parent_id=?1",
+                params![duplicate.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("child metadata");
+        assert_eq!(child_meta.0, root_meta.0);
+        assert_eq!(child_meta.0, child_meta.1);
+        assert_eq!(child_meta.2, None);
+    }
+
+    #[test]
+    fn legacy_backup_restore_sets_missing_lifecycle_fields_to_null() {
+        let dir = std::env::temp_dir().join(format!("treenote-legacy-restore-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("dir");
+        let backup_path = dir.join("legacy.sqlite3");
+        let backup = Connection::open(&backup_path).expect("backup");
+        backup.execute_batch(
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                label TEXT NOT NULL,
+                is_expanded INTEGER,
+                sort_order INTEGER NOT NULL,
+                content TEXT
+            );
+            INSERT INTO notes VALUES ('old', NULL, 'Old', 1, 0, 'body');",
+        )
+        .expect("legacy backup");
+        drop(backup);
+
+        let live = setup_test_conn();
+        insert_test_node(&live, "live", None, "Live", 0, "");
+        restore_notes_from_backup_path(&live, &backup_path).expect("restore");
+        let lifecycle: (Option<i64>, Option<i64>, Option<i64>) = live
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes WHERE id='old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("lifecycle");
+        assert_eq!(lifecycle, (None, None, None));
+        let version: i64 = live
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn current_backup_restore_preserves_lifecycle_fields() {
+        let dir = std::env::temp_dir().join(format!("treenote-current-restore-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("dir");
+        let backup_path = dir.join("current.sqlite3");
+        let backup = Connection::open(&backup_path).expect("backup");
+        ensure_db_schema(&backup).expect("schema");
+        backup.execute(
+            "INSERT INTO notes (id,parent_id,label,is_expanded,sort_order,content,created_at,modified_at,archived_at)
+             VALUES ('n',NULL,'N',1,0,'body',11,22,33)",
+            [],
+        )
+        .expect("insert");
+        drop(backup);
+
+        let live = setup_test_conn();
+        restore_notes_from_backup_path(&live, &backup_path).expect("restore");
+        let lifecycle: (Option<i64>, Option<i64>, Option<i64>) = live
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes WHERE id='n'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("lifecycle");
+        assert_eq!(lifecycle, (Some(11), Some(22), Some(33)));
+        let _ = fs::remove_dir_all(dir);
+    }
+
 }
