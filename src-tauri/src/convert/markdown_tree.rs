@@ -6,16 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const CREATE_NOTES_TABLE_SQL: &str = "
-CREATE TABLE IF NOT EXISTS notes (
-    id TEXT PRIMARY KEY,
-    parent_id TEXT,
-    label TEXT NOT NULL,
-    is_expanded INTEGER,
-    sort_order INTEGER NOT NULL,
-    content TEXT
-);
-CREATE INDEX IF NOT EXISTS notes_parent_id_idx ON notes(parent_id);";
+use crate::storage::{ensure_db_schema, now_millis, CREATE_NOTES_TABLE_SQL};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ImportSummary {
@@ -616,18 +607,21 @@ fn write_treenote_notebook(dest_path: &Path, rows: &[FlatNoteRow]) -> Result<(),
     let conn = Connection::open(dest_path).map_err(|e| e.to_string())?;
     conn.execute_batch(CREATE_NOTES_TABLE_SQL)
         .map_err(|e| e.to_string())?;
+    ensure_db_schema(&conn).map_err(|e| e.to_string())?;
 
+    let imported_at = now_millis();
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     for row in rows {
         tx.execute(
-            "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content) \
-             VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+            "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content, created_at, modified_at, archived_at) \
+             VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?6, NULL)",
             params![
                 row.id,
                 row.parent_id,
                 row.label,
                 row.sort_order,
-                row.content
+                row.content,
+                imported_at
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -703,6 +697,31 @@ mod tests {
             "No importable notes were found.",
         )
         .expect("import")
+    }
+
+    #[test]
+    fn imported_notes_get_current_schema_and_import_time_metadata() {
+        let root = temp_dir("metadata");
+        fs::write(root.join("note.md"), "body").expect("write");
+        let dest = temp_db("metadata-out");
+        import_fixture(&root, &dest, &default_options());
+        let conn = Connection::open(&dest).expect("open");
+        let metadata: (Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("metadata");
+        assert!(metadata.0.is_some());
+        assert_eq!(metadata.0, metadata.1);
+        assert_eq!(metadata.2, None);
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, 1);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(dest);
     }
 
     #[test]
