@@ -985,7 +985,24 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         ]);
 
         return items
-          .filter((item) => allVisibleNodeIds.has(item.value))
+          .filter((item) => {
+            if (!allVisibleNodeIds.has(item.value)) return false;
+            if (!item.isEffectivelyArchived) return true;
+            // An archived ancestor is only revealed when the search path actually
+            // leads to an archived match; unrelated archived branches stay hidden.
+            let current: FlatItem | undefined = item;
+            while (current) {
+              if (focusNodeIds.has(String(current.value))) return true;
+              const childOnPath = items.find(
+                (candidate) =>
+                  candidate.parentValue === current!.value &&
+                  allVisibleNodeIds.has(candidate.value)
+              );
+              if (!childOnPath) break;
+              current = childOnPath;
+            }
+            return false;
+          })
           .map((item) => ({
             ...item,
             // isDirectMatch is true if this item is one of the primary filter targets
