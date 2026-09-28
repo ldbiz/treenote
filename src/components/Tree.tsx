@@ -52,6 +52,7 @@ import {
   updateNode,
   moveNode,
   duplicateNode,
+  setNodeArchived,
 } from "../lib/tree";
 import { showMessage } from "../lib/dialogs";
 import NodeContextMenu, {
@@ -91,6 +92,8 @@ type FlatItem = HeadlessFlatTreeItemProps & {
   layout: string;
   isDraggable?: boolean;
   isDirectMatch?: boolean; // Flag for direct text match
+  archivedAt?: number | null;
+  isEffectivelyArchived?: boolean;
 };
 
 // Recursively convert nested tree data to flat array for FlatTree
@@ -98,22 +101,32 @@ const convertToFlatData = (
   nodes: OriginalTreeNodeData[],
   parentValue: UniqueIdentifier | null = null,
   initialOpen: Set<UniqueIdentifier>,
-  initialFlatData: FlatItem[] = []
+  initialFlatData: FlatItem[] = [],
+  inheritedArchived = false
 ): FlatItem[] => {
   nodes.forEach((node) => {
+    const isEffectivelyArchived = inheritedArchived || node.archivedAt != null;
     const flatNode: FlatItem = {
       value: node.id,
       parentValue: parentValue ?? undefined, // undefined for root
       layout: node.label,
       isDraggable: true, // All nodes are draggable by default
       isDirectMatch: false, // Initialize
+      archivedAt: node.archivedAt,
+      isEffectivelyArchived,
     };
     initialFlatData.push(flatNode);
     if (node.isExpanded) {
       initialOpen.add(node.id);
     }
     if (node.children) {
-      convertToFlatData(node.children, node.id, initialOpen, initialFlatData);
+      convertToFlatData(
+        node.children,
+        node.id,
+        initialOpen,
+        initialFlatData,
+        isEffectivelyArchived
+      );
     }
   });
   return initialFlatData;
@@ -894,6 +907,15 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       return formatSubtreeStats(count, item.parentValue === undefined);
     }, [contextMenu, items]);
 
+    const contextMenuArchiveLabel = useMemo(() => {
+      if (!contextMenu) return null;
+      const item = items.find((entry) => entry.value === contextMenu.nodeId);
+      if (!item) return null;
+      if (item.archivedAt != null) return "Unarchive" as const;
+      if (item.isEffectivelyArchived) return null;
+      return parentIds.has(item.value) ? ("Archive branch" as const) : ("Archive" as const);
+    }, [contextMenu, items, parentIds]);
+
     const reloadTreeFromBackend = useCallback(
       async (preserveOpenItems: Set<UniqueIdentifier>) => {
         const freshTreeData = await getInitialTree();
@@ -965,12 +987,14 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
             isDirectMatchForFilter: focusNodeIds.has(String(item.value)),
           }));
       } else {
-        // Not filtering, or filter is on but no matches: show all items
-        // Mark all as not being "direct matches" in the context of filtering
-        return items.map((item) => ({
-          ...item,
-          isDirectMatchForFilter: false,
-        }));
+        // Outside search/filter mode, explicitly archived roots and all inherited
+        // descendants stay in the complete model but are hidden from the normal tree.
+        return items
+          .filter((item) => !item.isEffectivelyArchived)
+          .map((item) => ({
+            ...item,
+            isDirectMatchForFilter: false,
+          }));
       }
     }, [items, focusNodeIds, isTreeCurrentlyFiltered, itemMap]);
 
@@ -1084,6 +1108,18 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           focusTreeNode(nodeId, { retry: true });
           return;
         }
+        if (action === "archive" || action === "unarchive") {
+          const success = await setNodeArchived(nodeId, action === "archive");
+          if (!success) {
+            await showMessage("Failed to update archive state.", {
+              title: "Archive note",
+              kind: "error",
+            });
+            return;
+          }
+          await reloadTreeFromBackend(openItems);
+          return;
+        }
         if (action === "delete") {
           onDeleteNode(nodeId);
         }
@@ -1094,6 +1130,8 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         handleDuplicateNode,
         onExportNode,
         onDeleteNode,
+        reloadTreeFromBackend,
+        openItems,
       ]
     );
 
@@ -1804,6 +1842,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                 : null
             }
             stats={contextMenuStats}
+            archiveLabel={contextMenuArchiveLabel}
             onAction={(action) => {
               void handleContextMenuAction(action);
             }}
