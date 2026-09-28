@@ -1695,6 +1695,10 @@ fn move_node_in_conn(
         .map_err(|e| e.to_string())?;
     let old_siblings =
         child_ids_in_order(&tx, old_parent_id.as_deref()).map_err(|e| e.to_string())?;
+    let old_position = old_siblings
+        .iter()
+        .position(|child| child == &id)
+        .ok_or_else(|| "Note not found".to_string())?;
 
     if let Some(ref parent_id) = new_parent_id {
         if old_parent_id != new_parent_id {
@@ -1747,7 +1751,7 @@ fn move_node_in_conn(
     siblings.retain(|child| child != &id);
     let position = new_sort_order.clamp(0, siblings.len() as i64) as usize;
     siblings.insert(position, id.clone());
-    let logically_moved = old_parent_id != new_parent_id || old_siblings != siblings;
+    let logically_moved = old_parent_id != new_parent_id || old_position != position;
     write_child_order(&tx, &siblings).map_err(|e| e.to_string())?;
     if logically_moved {
         tx.execute(
