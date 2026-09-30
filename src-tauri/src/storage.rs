@@ -201,8 +201,10 @@ pub(crate) fn now_millis() -> i64 {
 fn schema_column_names(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
     let sql = format!("PRAGMA table_info({table})");
     let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map([], |row| row.get::<_, String>(1))?
-        .collect()
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns)
 }
 
 pub(crate) fn ensure_db_schema(conn: &Connection) -> rusqlite::Result<()> {
