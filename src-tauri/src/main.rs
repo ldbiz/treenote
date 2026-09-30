@@ -69,6 +69,11 @@ fn update_node(id: String, new_label: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_node_expanded(id: String, expanded: bool) -> Result<(), String> {
+    storage::set_node_expanded(id, expanded)
+}
+
+#[tauri::command]
 fn delete_node(id: String) -> Result<(), String> {
     storage::delete_node(id)
 }
@@ -468,6 +473,7 @@ fn main() {
             get_tree,
             add_node,
             update_node,
+            set_node_expanded,
             delete_node,
             set_node_archived,
             move_node,
