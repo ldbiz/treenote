@@ -74,6 +74,19 @@ export async function updateNode(
   }
 }
 
+export async function setNodeExpanded(
+  id: string,
+  expanded: boolean
+): Promise<boolean> {
+  try {
+    await invoke("set_node_expanded", { id, expanded });
+    return true;
+  } catch (error) {
+    console.error("Failed to update expansion state:", error);
+    return false;
+  }
+}
+
 export async function deleteNode(id: string): Promise<boolean> {
   try {
     await invoke("delete_node", { id });
