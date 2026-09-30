@@ -1616,6 +1616,25 @@ pub fn update_node(id: String, new_label: String) -> Result<(), String> {
     update_node_in_conn(&conn, &id, &new_label)
 }
 
+fn set_node_expanded_in_conn(conn: &Connection, id: &str, expanded: bool) -> Result<(), String> {
+    let expanded = if expanded { 1 } else { 0 };
+    let changed = conn
+        .execute(
+            "UPDATE notes SET is_expanded=?1 WHERE id=?2 AND COALESCE(is_expanded,0)<>?1",
+            params![expanded, id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 && !note_exists(conn, id)? {
+        return Err("Note not found".into());
+    }
+    Ok(())
+}
+
+pub fn set_node_expanded(id: String, expanded: bool) -> Result<(), String> {
+    let conn = db_connection()?;
+    set_node_expanded_in_conn(&conn, &id, expanded)
+}
+
 pub fn delete_node(id: String) -> Result<(), String> {
     let mut conn = db_connection()?;
     delete_node_in_conn(&mut conn, &id).map_err(|e| e.to_string())
@@ -3654,6 +3673,37 @@ mod tests {
             )
             .expect("lifecycle");
         assert_eq!(lifecycle, (None, None, None));
+    }
+
+    #[test]
+    fn expansion_state_persists_without_stamping_modified_at() {
+        let conn = setup_test_conn();
+        insert_test_node(&conn, "n", None, "N", 0, "");
+        conn.execute(
+            "UPDATE notes SET is_expanded=1, modified_at=123 WHERE id='n'",
+            [],
+        )
+        .expect("seed");
+
+        set_node_expanded_in_conn(&conn, "n", false).expect("collapse");
+        let collapsed: (i64, i64) = conn
+            .query_row(
+                "SELECT is_expanded, modified_at FROM notes WHERE id='n'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("collapsed");
+        assert_eq!(collapsed, (0, 123));
+
+        set_node_expanded_in_conn(&conn, "n", true).expect("expand");
+        let expanded: (i64, i64) = conn
+            .query_row(
+                "SELECT is_expanded, modified_at FROM notes WHERE id='n'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("expanded");
+        assert_eq!(expanded, (1, 123));
     }
 
     #[test]
