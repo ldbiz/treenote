@@ -53,6 +53,7 @@ import {
   moveNode,
   duplicateNode,
   setNodeArchived,
+  setNodeExpanded,
 } from "../lib/tree";
 import { showMessage } from "../lib/dialogs";
 import NodeContextMenu, {
@@ -949,17 +950,22 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       return parentIds.has(item.value) ? ("Archive branch" as const) : ("Archive" as const);
     }, [contextMenu, items, parentIds]);
 
-    const toggleNodeOpen = useCallback((id: UniqueIdentifier) => {
-      setOpenItems((prevOpen) => {
-        const nextOpen = new Set(prevOpen);
-        if (nextOpen.has(id)) {
-          nextOpen.delete(id);
-        } else {
-          nextOpen.add(id);
-        }
-        return nextOpen;
-      });
-    }, []);
+    const toggleNodeOpen = useCallback(
+      (id: UniqueIdentifier) => {
+        const expanded = !openItems.has(id);
+        setOpenItems((prevOpen) => {
+          const nextOpen = new Set(prevOpen);
+          if (expanded) {
+            nextOpen.add(id);
+          } else {
+            nextOpen.delete(id);
+          }
+          return nextOpen;
+        });
+        void setNodeExpanded(String(id), expanded);
+      },
+      [openItems]
+    );
 
     // Determine the items to display in the FlatTree
     const displayItemsForFlatTree = useMemo(() => {
@@ -1035,7 +1041,21 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
 
     const flatTree = useHeadlessFlatTree_unstable(displayItemsForFlatTree, {
       openItems,
-      onOpenChange: (_, data) => setOpenItems(new Set(data.openItems)),
+      onOpenChange: (_, data) => {
+        const nextOpenItems = new Set(data.openItems);
+        const changedIds = new Set<UniqueIdentifier>([
+          ...openItems,
+          ...nextOpenItems,
+        ]);
+        changedIds.forEach((id) => {
+          const wasOpen = openItems.has(id);
+          const isOpen = nextOpenItems.has(id);
+          if (wasOpen !== isOpen) {
+            void setNodeExpanded(String(id), isOpen);
+          }
+        });
+        setOpenItems(nextOpenItems);
+      },
       defaultOpenItems: [], // Controlled mode
     });
 
@@ -1602,6 +1622,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           if (prevOpen.has(parentId)) return prevOpen;
           return new Set(prevOpen).add(parentId);
         });
+        void setNodeExpanded(parentId, true);
         // Reload tree from backend
         const treeData = await getInitialTree();
         const initialFlatItems = convertToFlatData(treeData, null, initialOpen);
