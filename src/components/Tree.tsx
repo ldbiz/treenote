@@ -148,18 +148,6 @@ const updateNodeLabelInFlatList = (
   });
 };
 
-// Helper to collect all node IDs from nested tree data
-function collectAllNodeIds(nodes: OriginalTreeNodeData[]): string[] {
-  let ids: string[] = [];
-  for (const node of nodes) {
-    ids.push(node.id);
-    if (node.children) {
-      ids = ids.concat(collectAllNodeIds(node.children));
-    }
-  }
-  return ids;
-}
-
 // --- Hierarchy guide lines ---
 
 // Per-row metadata used to draw the "L" connector lines that link a parent
