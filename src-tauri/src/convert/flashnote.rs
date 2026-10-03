@@ -5,16 +5,7 @@ use std::fs;
 use std::path::Path;
 use uuid::Uuid;
 
-const CREATE_NOTES_TABLE_SQL: &str = "
-CREATE TABLE IF NOT EXISTS notes (
-    id TEXT PRIMARY KEY,
-    parent_id TEXT,
-    label TEXT NOT NULL,
-    is_expanded INTEGER,
-    sort_order INTEGER NOT NULL,
-    content TEXT
-);
-CREATE INDEX IF NOT EXISTS notes_parent_id_idx ON notes(parent_id);";
+use crate::storage::{ensure_db_schema, now_millis, CREATE_NOTES_TABLE_SQL};
 
 const CREATE_FLASHNOTE_NOTES3_SQL: &str = "
 CREATE TABLE notes3(
@@ -470,7 +461,9 @@ fn write_treenote_notebook(dest_path: &Path, rows: &[FlashnoteRow]) -> Result<()
     let conn = Connection::open(dest_path).map_err(|e| e.to_string())?;
     conn.execute_batch(CREATE_NOTES_TABLE_SQL)
         .map_err(|e| e.to_string())?;
+    ensure_db_schema(&conn).map_err(|e| e.to_string())?;
 
+    let imported_at = now_millis();
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     for (parent_pid, children) in &children_by_parent {
         for (sort_order, row) in children.iter().enumerate() {
@@ -480,14 +473,15 @@ fn write_treenote_notebook(dest_path: &Path, rows: &[FlashnoteRow]) -> Result<()
                 id_map.get(parent_pid).cloned()
             };
             tx.execute(
-                "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content) \
-                 VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content, created_at, modified_at, archived_at) \
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?6, NULL)",
                 params![
                     id_map[&row.id],
                     parent_id,
                     label_from_name(&row.name),
                     sort_order as i64,
                     note_content(&row.note),
+                    imported_at,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -684,6 +678,27 @@ mod tests {
             .count();
         assert_eq!(roots, 2);
 
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_file(dest);
+    }
+
+    #[test]
+    fn import_uses_current_schema_and_import_time_metadata() {
+        let source = temp_path("metadata-src");
+        let dest = temp_path("metadata-dest");
+        create_flashnote_db(&source, &[(1, 0, 1, "Root", "body", 0)]);
+        import_flashnote(&source, &dest, "C:/other/current.sqlite3").expect("import");
+        let conn = Connection::open(&dest).expect("open");
+        let metadata: (Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("metadata");
+        assert!(metadata.0.is_some());
+        assert_eq!(metadata.0, metadata.1);
+        assert_eq!(metadata.2, None);
         let _ = fs::remove_file(source);
         let _ = fs::remove_file(dest);
     }

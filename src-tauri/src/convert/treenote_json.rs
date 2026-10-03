@@ -5,16 +5,7 @@ use std::fs;
 use std::path::Path;
 use uuid::Uuid;
 
-const CREATE_NOTES_TABLE_SQL: &str = "
-CREATE TABLE IF NOT EXISTS notes (
-    id TEXT PRIMARY KEY,
-    parent_id TEXT,
-    label TEXT NOT NULL,
-    is_expanded INTEGER,
-    sort_order INTEGER NOT NULL,
-    content TEXT
-);
-CREATE INDEX IF NOT EXISTS notes_parent_id_idx ON notes(parent_id);";
+use crate::storage::{ensure_db_schema, CREATE_NOTES_TABLE_SQL};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreenoteJsonNode {
@@ -29,6 +20,12 @@ pub struct TreenoteJsonNode {
     #[serde(default)]
     pub is_expanded: Option<bool>,
     #[serde(default)]
+    pub created_at: Option<i64>,
+    #[serde(default)]
+    pub modified_at: Option<i64>,
+    #[serde(default)]
+    pub archived_at: Option<i64>,
+    #[serde(default)]
     pub children: Vec<TreenoteJsonNode>,
 }
 
@@ -40,6 +37,9 @@ struct FlatNoteRow {
     content: String,
     sort_order: i64,
     is_expanded: Option<bool>,
+    created_at: Option<i64>,
+    modified_at: Option<i64>,
+    archived_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -190,7 +190,7 @@ fn build_export_nodes(
     parent_id: Option<&str>,
 ) -> rusqlite::Result<Vec<TreenoteJsonNode>> {
     let mut stmt = conn.prepare(
-        "SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded \
+        "SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded, created_at, modified_at, archived_at \
          FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC",
     )?;
     let rows = stmt.query_map(params![parent_id], |row| {
@@ -202,11 +202,14 @@ fn build_export_nodes(
             row.get(3)?,
             row.get(4)?,
             row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<i64>>(7)?,
+            row.get::<_, Option<i64>>(8)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, parent_id, label, content, sort_order, expanded) = row?;
+        let (id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at) = row?;
         let children = build_export_nodes(conn, Some(&id))?;
         out.push(TreenoteJsonNode {
             id,
@@ -215,6 +218,9 @@ fn build_export_nodes(
             content,
             sort_order,
             is_expanded: expanded.map(|v| v == 1),
+            created_at,
+            modified_at,
+            archived_at,
             children,
         });
     }
@@ -259,6 +265,9 @@ fn flatten_node(
         content: node.content.clone(),
         sort_order,
         is_expanded: node.is_expanded,
+        created_at: node.created_at,
+        modified_at: node.modified_at,
+        archived_at: node.archived_at,
     });
     for (index, child) in node.children.iter().enumerate() {
         flatten_node(child, Some(node.id.clone()), index as i64, out);
@@ -279,6 +288,7 @@ fn write_treenote_notebook(dest_path: &Path, rows: &[FlatNoteRow]) -> Result<(),
     let conn = Connection::open(dest_path).map_err(|e| e.to_string())?;
     conn.execute_batch(CREATE_NOTES_TABLE_SQL)
         .map_err(|e| e.to_string())?;
+    ensure_db_schema(&conn).map_err(|e| e.to_string())?;
 
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     for row in rows {
@@ -289,8 +299,8 @@ fn write_treenote_notebook(dest_path: &Path, rows: &[FlatNoteRow]) -> Result<(),
         };
         let is_expanded = row.is_expanded.map(|v| if v { 1 } else { 0 }).unwrap_or(1);
         tx.execute(
-            "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content, created_at, modified_at, archived_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 row.id,
                 parent_id,
@@ -298,6 +308,9 @@ fn write_treenote_notebook(dest_path: &Path, rows: &[FlatNoteRow]) -> Result<(),
                 is_expanded,
                 row.sort_order,
                 row.content,
+                row.created_at,
+                row.modified_at,
+                row.archived_at,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -329,6 +342,9 @@ mod tests {
                 content: "b".into(),
                 sort_order: 1,
                 is_expanded: Some(true),
+                created_at: None,
+                modified_at: None,
+                archived_at: None,
                 children: vec![],
             },
             TreenoteJsonNode {
@@ -338,6 +354,9 @@ mod tests {
                 content: "a".into(),
                 sort_order: 0,
                 is_expanded: Some(true),
+                created_at: None,
+                modified_at: None,
+                archived_at: None,
                 children: vec![
                     TreenoteJsonNode {
                         id: "child-1".into(),
@@ -346,6 +365,9 @@ mod tests {
                         content: "c1".into(),
                         sort_order: 0,
                         is_expanded: Some(true),
+                        created_at: None,
+                        modified_at: None,
+                        archived_at: None,
                         children: vec![],
                     },
                     TreenoteJsonNode {
@@ -355,6 +377,9 @@ mod tests {
                         content: "c2".into(),
                         sort_order: 1,
                         is_expanded: Some(true),
+                        created_at: None,
+                        modified_at: None,
+                        archived_at: None,
                         children: vec![],
                     },
                 ],
@@ -420,6 +445,9 @@ mod tests {
             content: "body".into(),
             sort_order: 0,
             is_expanded: None,
+            created_at: None,
+            modified_at: None,
+            archived_at: None,
             children: vec![],
         }];
         export_treenote_json(&json_path, &tree).expect("export");
@@ -471,6 +499,62 @@ mod tests {
         assert!(err.contains("currently open"));
 
         let _ = fs::remove_file(json_path);
+    }
+
+    #[test]
+    fn old_json_without_lifecycle_fields_imports_as_unknown() {
+        let json_path = temp_path("old.json");
+        let notebook_path = temp_path("old.sqlite3");
+        fs::write(
+            &json_path,
+            r#"[{"id":"root","label":"Root","content":"body","sort_order":0,"children":[]}]"#,
+        )
+        .expect("write");
+        import_treenote_json(&json_path, &notebook_path, "C:/other/current.sqlite3")
+            .expect("import");
+        let conn = Connection::open(&notebook_path).expect("open");
+        let lifecycle: (Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes WHERE id='root'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("metadata");
+        assert_eq!(lifecycle, (None, None, None));
+        let _ = fs::remove_file(json_path);
+        let _ = fs::remove_file(notebook_path);
+    }
+
+    #[test]
+    fn lifecycle_fields_round_trip() {
+        let json_path = temp_path("metadata.json");
+        let notebook_path = temp_path("metadata.sqlite3");
+        let tree = vec![TreenoteJsonNode {
+            id: "root".into(),
+            parent_id: None,
+            label: "Root".into(),
+            content: "body".into(),
+            sort_order: 0,
+            is_expanded: Some(true),
+            created_at: Some(11),
+            modified_at: Some(22),
+            archived_at: Some(33),
+            children: vec![],
+        }];
+        export_treenote_json(&json_path, &tree).expect("export");
+        import_treenote_json(&json_path, &notebook_path, "C:/other/current.sqlite3")
+            .expect("import");
+        let conn = Connection::open(&notebook_path).expect("open");
+        let lifecycle: (Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT created_at, modified_at, archived_at FROM notes WHERE id='root'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("metadata");
+        assert_eq!(lifecycle, (Some(11), Some(22), Some(33)));
+        let _ = fs::remove_file(json_path);
+        let _ = fs::remove_file(notebook_path);
     }
 
     #[test]

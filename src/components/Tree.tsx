@@ -52,6 +52,8 @@ import {
   updateNode,
   moveNode,
   duplicateNode,
+  setNodeArchived,
+  setNodeExpanded,
 } from "../lib/tree";
 import { showMessage } from "../lib/dialogs";
 import NodeContextMenu, {
@@ -91,6 +93,8 @@ type FlatItem = HeadlessFlatTreeItemProps & {
   layout: string;
   isDraggable?: boolean;
   isDirectMatch?: boolean; // Flag for direct text match
+  archivedAt?: number | null;
+  isEffectivelyArchived?: boolean;
 };
 
 // Recursively convert nested tree data to flat array for FlatTree
@@ -98,22 +102,32 @@ const convertToFlatData = (
   nodes: OriginalTreeNodeData[],
   parentValue: UniqueIdentifier | null = null,
   initialOpen: Set<UniqueIdentifier>,
-  initialFlatData: FlatItem[] = []
+  initialFlatData: FlatItem[] = [],
+  inheritedArchived = false
 ): FlatItem[] => {
   nodes.forEach((node) => {
+    const isEffectivelyArchived = inheritedArchived || node.archivedAt != null;
     const flatNode: FlatItem = {
       value: node.id,
       parentValue: parentValue ?? undefined, // undefined for root
       layout: node.label,
       isDraggable: true, // All nodes are draggable by default
       isDirectMatch: false, // Initialize
+      archivedAt: node.archivedAt,
+      isEffectivelyArchived,
     };
     initialFlatData.push(flatNode);
     if (node.isExpanded) {
       initialOpen.add(node.id);
     }
     if (node.children) {
-      convertToFlatData(node.children, node.id, initialOpen, initialFlatData);
+      convertToFlatData(
+        node.children,
+        node.id,
+        initialOpen,
+        initialFlatData,
+        isEffectivelyArchived
+      );
     }
   });
   return initialFlatData;
@@ -133,18 +147,6 @@ const updateNodeLabelInFlatList = (
     return item;
   });
 };
-
-// Helper to collect all node IDs from nested tree data
-function collectAllNodeIds(nodes: OriginalTreeNodeData[]): string[] {
-  let ids: string[] = [];
-  for (const node of nodes) {
-    ids.push(node.id);
-    if (node.children) {
-      ids = ids.concat(collectAllNodeIds(node.children));
-    }
-  }
-  return ids;
-}
 
 // --- Hierarchy guide lines ---
 
@@ -257,6 +259,7 @@ const SelectableDraggableFlatTreeItem = ({
   isDirectMatchForFilter, // New: Is this a direct match WHEN filtering is active?
   isFilterModeActive, // New: Is the tree filter UI active AND has found matches?
   isTreeCurrentlyFiltered, // New: Is the tree visually filtering nodes?
+  isEffectivelyArchived,
   allNodesWithSearchMatches, // New: All nodes with matches, regardless of filtering
   searchQuery, // Add searchQuery prop for label highlighting
   suppressClickAfterDragRef,
@@ -284,6 +287,7 @@ const SelectableDraggableFlatTreeItem = ({
   isDirectMatchForFilter?: boolean; // New: Is this a direct match WHEN filtering is active?
   isFilterModeActive?: boolean; // New: Is the tree filter UI active AND has found matches?
   isTreeCurrentlyFiltered?: boolean; // New: Is the tree visually filtering nodes?
+  isEffectivelyArchived?: boolean;
   allNodesWithSearchMatches: Set<string> | null; // Changed from optional to required: Set<string> | null
   searchQuery?: string; // Add searchQuery prop for label highlighting
   reloadKey?: number;
@@ -693,6 +697,8 @@ const SelectableDraggableFlatTreeItem = ({
                 ? "var(--hover)"
                 : undefined,
           fontWeight: isActuallySelected && !isRenaming ? 500 : undefined,
+          fontStyle: isEffectivelyArchived ? "italic" : undefined,
+          opacity: isEffectivelyArchived ? 0.72 : undefined,
           userSelect: isRenaming ? "text" : "none",
           WebkitUserSelect: isRenaming ? "text" : "none",
           msUserSelect: isRenaming ? "text" : "none",
@@ -780,6 +786,8 @@ interface TreeComponentProps {
   onExportNode: (nodeId: string) => Promise<void>;
   focusNodeIds: Set<string> | null; // These are the direct matches when filtering is on
   isTreeCurrentlyFiltered: boolean; // New: Is the tree visually filtering nodes?
+  showArchived: boolean;
+  onToggleShowArchived: () => void;
   allNodesWithSearchMatches: Set<string> | null; // New: All nodes with matches, regardless of filtering
   searchQuery?: string; // Add searchQuery prop for label highlighting
   reloadKey?: number;
@@ -800,7 +808,7 @@ interface TreeComponentHandle {
   getAllNodeIdsInOrder: () => string[];
   scrollNodeIntoView: (id: string) => void;
   focusNode: (id: string) => void;
-  getAllNodeIdsRecursive: () => string[];
+  getAllNodeIdsRecursive: (includeArchived?: boolean) => string[];
 }
 
 const findRootAncestor = (
@@ -855,6 +863,8 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       onExportNode,
       focusNodeIds, // Direct matches for filtering
       isTreeCurrentlyFiltered, // Is the tree visually filtered?
+      showArchived,
+      onToggleShowArchived,
       allNodesWithSearchMatches, // All nodes that have a match (for greying when not filtering)
       searchQuery, // Add searchQuery prop for label highlighting
       reloadKey,
@@ -894,6 +904,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       return formatSubtreeStats(count, item.parentValue === undefined);
     }, [contextMenu, items]);
 
+
     const reloadTreeFromBackend = useCallback(
       async (preserveOpenItems: Set<UniqueIdentifier>) => {
         const freshTreeData = await getInitialTree();
@@ -922,22 +933,36 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       return ids;
     }, [items]);
 
-    const toggleNodeOpen = useCallback((id: UniqueIdentifier) => {
-      setOpenItems((prevOpen) => {
-        const nextOpen = new Set(prevOpen);
-        if (nextOpen.has(id)) {
-          nextOpen.delete(id);
-        } else {
-          nextOpen.add(id);
-        }
-        return nextOpen;
-      });
-    }, []);
+    const contextMenuArchiveLabel = useMemo(() => {
+      if (!contextMenu) return null;
+      const item = items.find((entry) => entry.value === contextMenu.nodeId);
+      if (!item) return null;
+      if (item.archivedAt != null) return "Unarchive" as const;
+      if (item.isEffectivelyArchived) return null;
+      return parentIds.has(item.value) ? ("Archive branch" as const) : ("Archive" as const);
+    }, [contextMenu, items, parentIds]);
 
-    // Determine the items to display in the FlatTree
+    const toggleNodeOpen = useCallback(
+      (id: UniqueIdentifier) => {
+        const expanded = !openItems.has(id);
+        setOpenItems((prevOpen) => {
+          const nextOpen = new Set(prevOpen);
+          if (expanded) {
+            nextOpen.add(id);
+          } else {
+            nextOpen.delete(id);
+          }
+          return nextOpen;
+        });
+        void setNodeExpanded(String(id), expanded);
+      },
+      [openItems]
+    );
+
+    // Determine the items to display in the FlatTree. Archive visibility is
+    // a tree-level view setting; search/filter never overrides it.
     const displayItemsForFlatTree = useMemo(() => {
       if (isTreeCurrentlyFiltered && focusNodeIds && focusNodeIds.size > 0) {
-        // Filtering is ON and there are matches: show only direct matches and their ancestors
         const ancestorChainNodeIds = new Set<UniqueIdentifier>();
         focusNodeIds.forEach((directMatchId) => {
           let currentParentValue = itemMap.get(directMatchId)?.parentValue;
@@ -958,25 +983,50 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         ]);
 
         return items
-          .filter((item) => allVisibleNodeIds.has(item.value))
+          .filter(
+            (item) =>
+              allVisibleNodeIds.has(item.value) &&
+              (showArchived || !item.isEffectivelyArchived)
+          )
           .map((item) => ({
             ...item,
-            // isDirectMatch is true if this item is one of the primary filter targets
             isDirectMatchForFilter: focusNodeIds.has(String(item.value)),
           }));
-      } else {
-        // Not filtering, or filter is on but no matches: show all items
-        // Mark all as not being "direct matches" in the context of filtering
-        return items.map((item) => ({
-          ...item,
-          isDirectMatchForFilter: false,
-        }));
       }
-    }, [items, focusNodeIds, isTreeCurrentlyFiltered, itemMap]);
+
+      return items
+        .filter((item) => showArchived || !item.isEffectivelyArchived)
+        .map((item) => ({
+          ...item,
+          isDirectMatchForFilter:
+            allNodesWithSearchMatches?.has(String(item.value)) ?? false,
+        }));
+    }, [
+      items,
+      focusNodeIds,
+      isTreeCurrentlyFiltered,
+      itemMap,
+      allNodesWithSearchMatches,
+      showArchived,
+    ]);
 
     const flatTree = useHeadlessFlatTree_unstable(displayItemsForFlatTree, {
       openItems,
-      onOpenChange: (_, data) => setOpenItems(new Set(data.openItems)),
+      onOpenChange: (_, data) => {
+        const nextOpenItems = new Set(data.openItems);
+        const changedIds = new Set<UniqueIdentifier>([
+          ...openItems,
+          ...nextOpenItems,
+        ]);
+        changedIds.forEach((id) => {
+          const wasOpen = openItems.has(id);
+          const isOpen = nextOpenItems.has(id);
+          if (wasOpen !== isOpen) {
+            void setNodeExpanded(String(id), isOpen);
+          }
+        });
+        setOpenItems(nextOpenItems);
+      },
       defaultOpenItems: [], // Controlled mode
     });
 
@@ -1084,6 +1134,18 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           focusTreeNode(nodeId, { retry: true });
           return;
         }
+        if (action === "archive" || action === "unarchive") {
+          const success = await setNodeArchived(nodeId, action === "archive");
+          if (!success) {
+            await showMessage("Failed to update archive state.", {
+              title: "Archive note",
+              kind: "error",
+            });
+            return;
+          }
+          await reloadTreeFromBackend(openItems);
+          return;
+        }
         if (action === "delete") {
           onDeleteNode(nodeId);
         }
@@ -1094,6 +1156,8 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         handleDuplicateNode,
         onExportNode,
         onDeleteNode,
+        reloadTreeFromBackend,
+        openItems,
       ]
     );
 
@@ -1529,6 +1593,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           if (prevOpen.has(parentId)) return prevOpen;
           return new Set(prevOpen).add(parentId);
         });
+        void setNodeExpanded(parentId, true);
         // Reload tree from backend
         const treeData = await getInitialTree();
         const initialFlatItems = convertToFlatData(treeData, null, initialOpen);
@@ -1658,8 +1723,10 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         focusNode: (id: string) => {
           focusTreeNode(id);
         },
-        getAllNodeIdsRecursive: () => {
-          return collectAllNodeIds(treeData);
+        getAllNodeIdsRecursive: (includeArchived = false) => {
+          return items
+            .filter((item) => includeArchived || !item.isEffectivelyArchived)
+            .map((item) => String(item.value));
         },
       }),
       [
@@ -1704,6 +1771,17 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           width: "100%",
         }}
       >
+        <div className="tree-view-bar">
+          <span className="tree-view-title">Notes</span>
+          <label className="tree-view-toggle">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={onToggleShowArchived}
+            />
+            Show archived
+          </label>
+        </div>
         <div
           ref={treeScrollerRef}
           className={`tree-scroller${activeDragId ? " tree-scroller-dragging" : ""}`}
@@ -1760,6 +1838,9 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                         // Props for color logic (isDirectMatchForFilter is already in allGeneratedProps)
                         isFilterModeActive={isFilterModeActiveWithMatches}
                         isTreeCurrentlyFiltered={isTreeCurrentlyFiltered}
+                        isEffectivelyArchived={
+                          itemMap.get(allGeneratedProps.value)?.isEffectivelyArchived
+                        }
                         allNodesWithSearchMatches={allNodesWithSearchMatches}
                         searchQuery={searchQuery}
                         suppressClickAfterDragRef={suppressClickAfterDragRef}
@@ -1804,6 +1885,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
                 : null
             }
             stats={contextMenuStats}
+            archiveLabel={contextMenuArchiveLabel}
             onAction={(action) => {
               void handleContextMenuAction(action);
             }}

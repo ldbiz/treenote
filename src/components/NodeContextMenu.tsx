@@ -5,12 +5,19 @@ import {
   type PopupMenuCloseDetail,
 } from "./popupMenu";
 
-export type NodeContextMenuAction = "rename" | "duplicate" | "export" | "delete";
+export type NodeContextMenuAction =
+  | "rename"
+  | "duplicate"
+  | "export"
+  | "archive"
+  | "unarchive"
+  | "delete";
 
 type NodeContextMenuProps = {
   open: boolean;
   position: { x: number; y: number } | null;
   stats?: string;
+  archiveLabel?: "Archive" | "Archive branch" | "Unarchive" | null;
   onAction: (action: NodeContextMenuAction) => void;
   onClose: (detail: PopupMenuCloseDetail) => void;
 };
@@ -19,6 +26,7 @@ export default function NodeContextMenu({
   open,
   position,
   stats,
+  archiveLabel = null,
   onAction,
   onClose,
 }: NodeContextMenuProps) {
@@ -56,6 +64,17 @@ export default function NodeContextMenu({
       <button type="button" role="menuitem" onClick={() => onAction("export")}>
         Export
       </button>
+      {archiveLabel ? (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() =>
+            onAction(archiveLabel === "Unarchive" ? "unarchive" : "archive")
+          }
+        >
+          {archiveLabel}
+        </button>
+      ) : null}
 
       <div className="node-context-menu-divider" role="separator" />
       <button
