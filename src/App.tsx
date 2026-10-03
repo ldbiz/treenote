@@ -515,7 +515,9 @@ function App() {
 
   const getAllNodeDataForSearch = useCallback(
     (): Promise<Array<{ id: string; content: string; label: string }>> =>
-      invoke("get_search_node_data"),
+      invoke<Array<{ id: string; content: string; label: string }>>(
+        "get_search_node_data"
+      ),
     []
   );
 
