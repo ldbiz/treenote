@@ -798,6 +798,8 @@ interface TreeComponentProps {
   onExportNode: (nodeId: string) => Promise<void>;
   focusNodeIds: Set<string> | null; // These are the direct matches when filtering is on
   isTreeCurrentlyFiltered: boolean; // New: Is the tree visually filtering nodes?
+  showArchived: boolean;
+  onToggleShowArchived: () => void;
   allNodesWithSearchMatches: Set<string> | null; // New: All nodes with matches, regardless of filtering
   searchQuery?: string; // Add searchQuery prop for label highlighting
   reloadKey?: number;
@@ -818,7 +820,7 @@ interface TreeComponentHandle {
   getAllNodeIdsInOrder: () => string[];
   scrollNodeIntoView: (id: string) => void;
   focusNode: (id: string) => void;
-  getAllNodeIdsRecursive: () => string[];
+  getAllNodeIdsRecursive: (includeArchived?: boolean) => string[];
 }
 
 const findRootAncestor = (
@@ -873,6 +875,8 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       onExportNode,
       focusNodeIds, // Direct matches for filtering
       isTreeCurrentlyFiltered, // Is the tree visually filtered?
+      showArchived,
+      onToggleShowArchived,
       allNodesWithSearchMatches, // All nodes that have a match (for greying when not filtering)
       searchQuery, // Add searchQuery prop for label highlighting
       reloadKey,
@@ -967,27 +971,10 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       [openItems]
     );
 
-    // Determine the items to display in the FlatTree
+    // Determine the items to display in the FlatTree. Archive visibility is
+    // a tree-level view setting; search/filter never overrides it.
     const displayItemsForFlatTree = useMemo(() => {
-      const archivedSearchPathIds = new Set<UniqueIdentifier>();
-      if (allNodesWithSearchMatches) {
-        allNodesWithSearchMatches.forEach((matchId) => {
-          const match = itemMap.get(matchId);
-          if (!match?.isEffectivelyArchived) return;
-          archivedSearchPathIds.add(match.value);
-          let currentParentValue = match.parentValue;
-          while (currentParentValue) {
-            const parentItem = itemMap.get(currentParentValue);
-            if (!parentItem) break;
-            archivedSearchPathIds.add(parentItem.value);
-            currentParentValue = parentItem.parentValue;
-          }
-        });
-      }
-
       if (isTreeCurrentlyFiltered && focusNodeIds && focusNodeIds.size > 0) {
-        // Filtering is ON and there are matches: show direct matches and their
-        // ancestors, while keeping unrelated archived branches hidden.
         const ancestorChainNodeIds = new Set<UniqueIdentifier>();
         focusNodeIds.forEach((directMatchId) => {
           let currentParentValue = itemMap.get(directMatchId)?.parentValue;
@@ -1011,7 +998,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           .filter(
             (item) =>
               allVisibleNodeIds.has(item.value) &&
-              (!item.isEffectivelyArchived || archivedSearchPathIds.has(item.value))
+              (showArchived || !item.isEffectivelyArchived)
           )
           .map((item) => ({
             ...item,
@@ -1019,13 +1006,8 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           }));
       }
 
-      // Outside filtered mode, active notes stay visible and archived content is
-      // revealed only along paths to archived search matches.
       return items
-        .filter(
-          (item) =>
-            !item.isEffectivelyArchived || archivedSearchPathIds.has(item.value)
-        )
+        .filter((item) => showArchived || !item.isEffectivelyArchived)
         .map((item) => ({
           ...item,
           isDirectMatchForFilter:
@@ -1037,6 +1019,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       isTreeCurrentlyFiltered,
       itemMap,
       allNodesWithSearchMatches,
+      showArchived,
     ]);
 
     const flatTree = useHeadlessFlatTree_unstable(displayItemsForFlatTree, {
@@ -1752,8 +1735,10 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         focusNode: (id: string) => {
           focusTreeNode(id);
         },
-        getAllNodeIdsRecursive: () => {
-          return collectAllNodeIds(treeData);
+        getAllNodeIdsRecursive: (includeArchived = false) => {
+          return items
+            .filter((item) => includeArchived || !item.isEffectivelyArchived)
+            .map((item) => String(item.value));
         },
       }),
       [
@@ -1798,6 +1783,17 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
           width: "100%",
         }}
       >
+        <div className="tree-view-bar">
+          <span className="tree-view-title">Notes</span>
+          <label className="tree-view-toggle">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={onToggleShowArchived}
+            />
+            Show archived
+          </label>
+        </div>
         <div
           ref={treeScrollerRef}
           className={`tree-scroller${activeDragId ? " tree-scroller-dragging" : ""}`}
