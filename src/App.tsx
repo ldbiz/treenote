@@ -513,24 +513,9 @@ function App() {
     return [];
   }, []);
 
-  // New function that gets both node content and label for search
-  const getNodeDataForSearch = useCallback(
-    async (nodeId: string): Promise<{ content: string; label: string }> => {
-      try {
-        // Get both content and node info in parallel
-        const [content, nodeInfo] = await Promise.all([
-          invoke<string>("get_node_content", { id: nodeId }),
-          invoke<{ label: string }>("get_node", { id: nodeId }),
-        ]);
-        return {
-          content: content || "",
-          label: nodeInfo?.label || "",
-        };
-      } catch (error) {
-        console.error(`Failed to get data for node ${nodeId}:`, error);
-        return { content: "", label: "" };
-      }
-    },
+  const getAllNodeDataForSearch = useCallback(
+    (): Promise<Array<{ id: string; content: string; label: string }>> =>
+      invoke("get_search_node_data"),
     []
   );
 
@@ -772,7 +757,7 @@ function App() {
               selectedNodeId={selectedNodeId}
               onSearchResultNavigation={handleSearchResultNavigationInApp}
               getAllNodeIds={getAllNodeIdsForSearch}
-              getNodeDataForSearch={getNodeDataForSearch}
+              getAllNodeDataForSearch={getAllNodeDataForSearch}
               isTreeFilterActive={isTreeFilterEnabled}
               onToggleTreeFilter={handleToggleTreeFilter}
               onSearchActivity={handleSearchActivity}
