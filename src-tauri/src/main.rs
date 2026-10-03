@@ -94,6 +94,11 @@ fn get_node_content(id: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_search_node_data() -> Result<Vec<storage::SearchNodeData>, String> {
+    storage::fetch_search_node_data()
+}
+
+#[tauri::command]
 fn get_node(id: String) -> Result<TreeNode, String> {
     storage::get_node(id)
 }
@@ -478,6 +483,7 @@ fn main() {
             set_node_archived,
             move_node,
             get_node_content,
+            get_search_node_data,
             update_node_content,
             get_node,
             get_settings,
