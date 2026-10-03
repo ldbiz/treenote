@@ -1805,14 +1805,15 @@ fn fetch_search_node_data_in_conn(conn: &Connection) -> rusqlite::Result<Vec<Sea
     let mut stmt = conn.prepare(
         "SELECT id, label, COALESCE(content,'') FROM notes ORDER BY rowid ASC"
     )?;
-    stmt.query_map([], |row| {
+    let rows = stmt.query_map([], |row| {
         Ok(SearchNodeData {
             id: row.get(0)?,
             label: row.get(1)?,
             content: row.get(2)?,
         })
-    })?
-    .collect()
+    })?;
+    let nodes = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(nodes)
 }
 
 pub fn fetch_search_node_data() -> Result<Vec<SearchNodeData>, String> {
