@@ -588,8 +588,7 @@ function App() {
 
   const activeSearchOverall =
     isSearchUIVisible && currentSearchQueryInPanel.trim() !== "";
-  // Search always reveals matching archived paths; the checkbox still controls
-  // whether active notes are reduced to matches/ancestors during a normal search.
+  // Filtering narrows whatever scope the tree view currently exposes.
   const isTreeCurrentlyFilteredReal =
     isTreeFilterEnabled && activeSearchOverall;
   const pendingDeleteIsTree =
