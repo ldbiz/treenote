@@ -24,9 +24,9 @@ interface TextPanelProps {
   selectedNodeId: string | null;
   onSearchResultNavigation: (nodeId: string) => void;
   getAllNodeIds: () => string[];
-  getNodeDataForSearch: (
-    nodeId: string
-  ) => Promise<{ content: string; label: string }>;
+  getAllNodeDataForSearch: () => Promise<
+    Array<{ id: string; content: string; label: string }>
+  >;
   isTreeFilterActive: boolean;
   onToggleTreeFilter: () => void;
   onSearchActivity: (
@@ -64,7 +64,7 @@ const TextPanel = forwardRef<TextPanelHandle, TextPanelProps>(({
   selectedNodeId,
   onSearchResultNavigation,
   getAllNodeIds,
-  getNodeDataForSearch,
+  getAllNodeDataForSearch,
   isTreeFilterActive,
   onToggleTreeFilter,
   onSearchActivity,
@@ -500,13 +500,20 @@ const TextPanel = forwardRef<TextPanelHandle, TextPanelProps>(({
         ...allNodeIds.slice(0, searchStartIndexInTree),
       ];
 
+      const allNodeData = await getAllNodeDataForSearch();
+      if (!isSearchGenerationCurrent(searchId)) return;
+      const nodeDataById = new Map(
+        allNodeData.map((node) => [node.id, node] as const)
+      );
+
       const escapedQuery = escapeLiteralRegex(queryToSearch);
       const regex = new RegExp(escapedQuery, "gi");
 
       for (const nodeId of orderedNodesToSearch) {
         if (!isSearchGenerationCurrent(searchId)) return;
 
-        const nodeData = await getNodeDataForSearch(nodeId);
+        const nodeData = nodeDataById.get(nodeId);
+        if (!nodeData) continue;
         const nodeContent = nodeId === selectedNodeId ? text : nodeData.content;
         const nodeLabel = nodeData.label;
 
