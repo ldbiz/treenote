@@ -272,6 +272,39 @@ body {
   font-family: var(--editor-font-family, inherit);
 }
 
+.tree-view-bar {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background-color: var(--panel-bg);
+}
+
+.tree-view-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.tree-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.tree-view-toggle input {
+  margin: 0;
+}
+
 .tree-scroller {
   flex: 1;
   min-height: 0;
