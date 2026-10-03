@@ -1793,6 +1793,33 @@ pub fn get_node_content(id: String) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())
 }
+
+#[derive(Debug, Serialize)]
+pub struct SearchNodeData {
+    id: String,
+    label: String,
+    content: String,
+}
+
+fn fetch_search_node_data_in_conn(conn: &Connection) -> rusqlite::Result<Vec<SearchNodeData>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, label, COALESCE(content,'') FROM notes ORDER BY rowid ASC"
+    )?;
+    stmt.query_map([], |row| {
+        Ok(SearchNodeData {
+            id: row.get(0)?,
+            label: row.get(1)?,
+            content: row.get(2)?,
+        })
+    })?
+    .collect()
+}
+
+pub fn fetch_search_node_data() -> Result<Vec<SearchNodeData>, String> {
+    let conn = db_connection()?;
+    fetch_search_node_data_in_conn(&conn).map_err(|e| e.to_string())
+}
+
 pub fn get_node(id: String) -> Result<TreeNode, String> {
     let conn = db_connection()?;
     conn.query_row(
@@ -3673,6 +3700,27 @@ mod tests {
             )
             .expect("lifecycle");
         assert_eq!(lifecycle, (None, None, None));
+    }
+
+    #[test]
+    fn search_snapshot_returns_active_and_archived_notes_in_one_read() {
+        let conn = setup_test_conn();
+        insert_test_node(&conn, "active", None, "Active", 0, "alpha");
+        insert_test_node(&conn, "archived", None, "Archived", 1, "beta");
+        conn.execute(
+            "UPDATE notes SET archived_at=123 WHERE id='archived'",
+            [],
+        )
+        .expect("archive");
+
+        let nodes = fetch_search_node_data_in_conn(&conn).expect("search snapshot");
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().any(|node| {
+            node.id == "active" && node.label == "Active" && node.content == "alpha"
+        }));
+        assert!(nodes.iter().any(|node| {
+            node.id == "archived" && node.label == "Archived" && node.content == "beta"
+        }));
     }
 
     #[test]
