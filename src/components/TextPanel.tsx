@@ -28,6 +28,7 @@ interface TextPanelProps {
     Array<{ id: string; content: string; label: string }>
   >;
   isTreeFilterActive: boolean;
+  showArchived: boolean;
   onToggleTreeFilter: () => void;
   onSearchActivity: (
     isActive: boolean,
@@ -66,6 +67,7 @@ const TextPanel = forwardRef<TextPanelHandle, TextPanelProps>(({
   getAllNodeIds,
   getAllNodeDataForSearch,
   isTreeFilterActive,
+  showArchived,
   onToggleTreeFilter,
   onSearchActivity,
 }, ref) => {
@@ -657,6 +659,17 @@ const TextPanel = forwardRef<TextPanelHandle, TextPanelProps>(({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isTreeFilterActive]);
+
+  const prevShowArchivedRef = useRef(showArchived);
+  useEffect(() => {
+    const archiveScopeChanged = prevShowArchivedRef.current !== showArchived;
+    prevShowArchivedRef.current = showArchived;
+
+    if (archiveScopeChanged && activeSearchQuery.trim()) {
+      performSearch();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived]);
 
   const handleSearchSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
