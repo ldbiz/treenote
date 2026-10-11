@@ -297,7 +297,7 @@ fn write_treenote_notebook(dest_path: &Path, rows: &[FlatNoteRow]) -> Result<(),
             Some(parent) if known_ids.contains(parent) => Some(parent.clone()),
             Some(_) => None,
         };
-        let is_expanded = row.is_expanded.map(|v| if v { 1 } else { 0 }).unwrap_or(1);
+        let is_expanded = row.is_expanded.map(|v| if v { 1 } else { 0 }).unwrap_or(0);
         tx.execute(
             "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content, created_at, modified_at, archived_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -521,6 +521,51 @@ mod tests {
             )
             .expect("metadata");
         assert_eq!(lifecycle, (None, None, None));
+        let expanded: i64 = conn
+            .query_row(
+                "SELECT is_expanded FROM notes WHERE id='root'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expanded");
+        assert_eq!(expanded, 0);
+        let _ = fs::remove_file(json_path);
+        let _ = fs::remove_file(notebook_path);
+    }
+
+    #[test]
+    fn explicit_expansion_metadata_survives_import() {
+        let json_path = temp_path("expanded.json");
+        let notebook_path = temp_path("expanded.sqlite3");
+        fs::write(
+            &json_path,
+            r#"[{
+                "id":"open",
+                "label":"Open",
+                "content":"",
+                "sort_order":0,
+                "is_expanded":true,
+                "children":[
+                    {"id":"closed","label":"Closed","content":"","sort_order":0,"is_expanded":false,"children":[]},
+                    {"id":"missing","label":"Missing","content":"","sort_order":1,"children":[]}
+                ]
+            }]"#,
+        )
+        .expect("write");
+        import_treenote_json(&json_path, &notebook_path, "C:/other/current.sqlite3")
+            .expect("import");
+        let conn = Connection::open(&notebook_path).expect("open");
+        let expanded = |id: &str| -> i64 {
+            conn.query_row(
+                "SELECT is_expanded FROM notes WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("expanded")
+        };
+        assert_eq!(expanded("open"), 1);
+        assert_eq!(expanded("closed"), 0);
+        assert_eq!(expanded("missing"), 0);
         let _ = fs::remove_file(json_path);
         let _ = fs::remove_file(notebook_path);
     }

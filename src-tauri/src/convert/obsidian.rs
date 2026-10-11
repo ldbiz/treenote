@@ -98,6 +98,27 @@ mod tests {
     }
 
     #[test]
+    fn imported_notes_default_to_collapsed() {
+        let root = temp_dir("collapsed");
+        fs::create_dir_all(root.join("Projects")).expect("mkdir");
+        fs::write(root.join("Welcome.md"), "welcome").expect("write");
+        fs::write(root.join("Projects/Alpha.md"), "alpha").expect("write");
+        let dest = temp_db("collapsed-out");
+        import_obsidian(&root, &dest, "C:/other/current.sqlite3").expect("import");
+        let conn = Connection::open(&dest).expect("open");
+        let expanded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE COALESCE(is_expanded, 1) <> 0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expanded count");
+        assert_eq!(expanded, 0);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(dest);
+    }
+
+    #[test]
     fn ignores_obsidian_directory() {
         let root = temp_dir("dot-obsidian");
         fs::create_dir_all(root.join(".obsidian")).expect("mkdir");

@@ -474,7 +474,7 @@ fn write_treenote_notebook(dest_path: &Path, rows: &[FlashnoteRow]) -> Result<()
             };
             tx.execute(
                 "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content, created_at, modified_at, archived_at) \
-                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?6, NULL)",
+                 VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?6, NULL)",
                 params![
                     id_map[&row.id],
                     parent_id,
@@ -699,6 +699,31 @@ mod tests {
         assert!(metadata.0.is_some());
         assert_eq!(metadata.0, metadata.1);
         assert_eq!(metadata.2, None);
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_file(dest);
+    }
+
+    #[test]
+    fn imported_notes_default_to_collapsed() {
+        let source = temp_path("collapsed-src");
+        let dest = temp_path("collapsed-dest");
+        create_flashnote_db(
+            &source,
+            &[
+                (1, 0, 1, "Root", "body", 0),
+                (2, 1, 1, "Child", "child", 0),
+            ],
+        );
+        import_flashnote(&source, &dest, "C:/other/current.sqlite3").expect("import");
+        let conn = Connection::open(&dest).expect("open");
+        let expanded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE COALESCE(is_expanded, 1) <> 0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expanded count");
+        assert_eq!(expanded, 0);
         let _ = fs::remove_file(source);
         let _ = fs::remove_file(dest);
     }

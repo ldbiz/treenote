@@ -223,6 +223,13 @@ pub(crate) fn ensure_db_schema(conn: &Connection) -> rusqlite::Result<()> {
     if version > CURRENT_SCHEMA_VERSION {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    // Expansion persistence starts at schema version 1. Pre-v1 `is_expanded`
+    // values were not reliably saved user state, so collapse them once on the
+    // legacy upgrade. Do not touch lifecycle timestamps, and do not repeat
+    // this reset on later opens or future version bumps.
+    if version < 1 {
+        conn.execute("UPDATE notes SET is_expanded = 0", [])?;
+    }
     if version < CURRENT_SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }
@@ -3701,6 +3708,119 @@ mod tests {
             )
             .expect("lifecycle");
         assert_eq!(lifecycle, (None, None, None));
+        let expanded: i64 = conn
+            .query_row("SELECT is_expanded FROM notes WHERE id='old'", [], |row| {
+                row.get(0)
+            })
+            .expect("expanded");
+        assert_eq!(expanded, 0);
+    }
+
+    #[test]
+    fn legacy_migration_collapses_expansion_without_changing_lifecycle() {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                label TEXT NOT NULL,
+                is_expanded INTEGER,
+                sort_order INTEGER NOT NULL,
+                content TEXT,
+                created_at INTEGER,
+                modified_at INTEGER,
+                archived_at INTEGER
+            );
+            INSERT INTO notes (
+                id, parent_id, label, is_expanded, sort_order, content,
+                created_at, modified_at, archived_at
+            ) VALUES ('old', NULL, 'Old', 1, 0, 'body', 11, 22, NULL);",
+        )
+        .expect("version 0 schema");
+
+        ensure_db_schema(&conn).expect("migrate");
+
+        let row: (i64, Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT is_expanded, created_at, modified_at, archived_at FROM notes WHERE id='old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("row");
+        assert_eq!(row, (0, Some(11), Some(22), None));
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_expansion_reset_is_one_shot() {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                label TEXT NOT NULL,
+                is_expanded INTEGER,
+                sort_order INTEGER NOT NULL,
+                content TEXT
+            );
+            INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content)
+            VALUES ('old', NULL, 'Old', 1, 0, 'body');",
+        )
+        .expect("legacy schema");
+
+        ensure_db_schema(&conn).expect("migrate");
+        conn.execute("UPDATE notes SET is_expanded=1 WHERE id='old'", [])
+            .expect("expand after migration");
+
+        ensure_db_schema(&conn).expect("reopen");
+
+        let expanded: i64 = conn
+            .query_row("SELECT is_expanded FROM notes WHERE id='old'", [], |row| {
+                row.get(0)
+            })
+            .expect("expanded");
+        assert_eq!(expanded, 1);
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn existing_version_one_database_keeps_expansion_state() {
+        let conn = Connection::open_in_memory().expect("db");
+        ensure_db_schema(&conn).expect("create v1");
+        conn.execute_batch(
+            "INSERT INTO notes (
+                id, parent_id, label, is_expanded, sort_order, content,
+                created_at, modified_at, archived_at
+            ) VALUES
+                ('open', NULL, 'Open', 1, 0, 'a', 1, 2, NULL),
+                ('closed', NULL, 'Closed', 0, 1, 'b', 3, 4, 5);",
+        )
+        .expect("seed");
+
+        ensure_db_schema(&conn).expect("reopen");
+
+        let open: (i64, i64) = conn
+            .query_row(
+                "SELECT is_expanded, modified_at FROM notes WHERE id='open'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("open");
+        let closed: (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT is_expanded, modified_at, archived_at FROM notes WHERE id='closed'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("closed");
+        assert_eq!(open, (1, 2));
+        assert_eq!(closed, (0, 4, Some(5)));
     }
 
     #[test]
@@ -3759,6 +3879,7 @@ mod tests {
     fn creation_and_noop_updates_follow_lifecycle_semantics() {
         let mut conn = setup_test_conn();
         let node = add_node_in_conn(&mut conn, None, "Note".into()).expect("add");
+        assert_eq!(node.is_expanded, Some(true));
         let (created, modified, archived): (Option<i64>, Option<i64>, Option<i64>) = conn
             .query_row(
                 "SELECT created_at, modified_at, archived_at FROM notes WHERE id=?1",

@@ -614,7 +614,7 @@ fn write_treenote_notebook(dest_path: &Path, rows: &[FlatNoteRow]) -> Result<(),
     for row in rows {
         tx.execute(
             "INSERT INTO notes (id, parent_id, label, is_expanded, sort_order, content, created_at, modified_at, archived_at) \
-             VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?6, NULL)",
+             VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?6, NULL)",
             params![
                 row.id,
                 row.parent_id,
@@ -720,6 +720,26 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
         assert_eq!(version, 1);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(dest);
+    }
+
+    #[test]
+    fn imported_notes_default_to_collapsed() {
+        let root = temp_dir("collapsed");
+        fs::create_dir_all(root.join("Parent")).expect("mkdir");
+        fs::write(root.join("Parent/Child.md"), "child").expect("write");
+        let dest = temp_db("collapsed-out");
+        import_fixture(&root, &dest, &default_options());
+        let conn = Connection::open(&dest).expect("open");
+        let expanded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE COALESCE(is_expanded, 1) <> 0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expanded count");
+        assert_eq!(expanded, 0);
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(dest);
     }

@@ -94,6 +94,26 @@ mod tests {
     }
 
     #[test]
+    fn imported_notes_default_to_collapsed() {
+        let root = temp_dir("collapsed");
+        fs::create_dir_all(root.join("Notebook")).expect("mkdir");
+        fs::write(root.join("Notebook/Note.md"), "body").expect("write");
+        let dest = temp_db("collapsed-out");
+        import_joplin(&root, &dest, "C:/other/current.sqlite3").expect("import");
+        let conn = Connection::open(&dest).expect("open");
+        let expanded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE COALESCE(is_expanded, 1) <> 0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expanded count");
+        assert_eq!(expanded, 0);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(dest);
+    }
+
+    #[test]
     fn front_matter_title_overrides_filename() {
         let root = temp_dir("fm");
         fs::write(
