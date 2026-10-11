@@ -1288,6 +1288,7 @@ fn restore_notes_from_backup(
     live: &Connection,
     backup_path: &Path,
     backup_columns: &[String],
+    backup_schema_version: i64,
 ) -> Result<(), String> {
     ensure_db_schema(live).map_err(|e| e.to_string())?;
     let backup_path_str = backup_path
@@ -1298,11 +1299,18 @@ fn restore_notes_from_backup(
     live.execute_batch(&attach_sql)
         .map_err(|e| format!("Failed to attach backup: {}", e))?;
 
+    // Pre-v1 expansion flags were not persisted user state. Collapse them in
+    // the restore INSERT itself so a legacy backup cannot reintroduce them
+    // into an already-v1 notebook. Other columns, including modified_at, are
+    // copied unchanged.
+    let legacy_expansion = backup_schema_version < 1;
     let column_list = CURRENT_NOTES_COLUMNS.join(", ");
     let select_list = CURRENT_NOTES_COLUMNS
         .iter()
         .map(|column| {
-            if backup_columns.iter().any(|candidate| candidate == column) {
+            if legacy_expansion && *column == "is_expanded" {
+                "0 AS is_expanded".to_string()
+            } else if backup_columns.iter().any(|candidate| candidate == column) {
                 (*column).to_string()
             } else {
                 format!("NULL AS {column}")
@@ -1344,7 +1352,10 @@ pub(crate) fn restore_notes_from_backup_path(
             .map_err(|e| format!("Failed to open backup: {}", e))?;
     validate_backup_notes_schema(&backup)?;
     let columns = notes_column_names(&backup, NOTES_TABLE)?;
-    restore_notes_from_backup(live, backup_path, &columns)
+    let backup_schema_version: i64 = backup
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    restore_notes_from_backup(live, backup_path, &columns, backup_schema_version)
 }
 
 fn lock_state_preserving_backup(lock_state: LockState, timestamp: u64) -> LockState {
@@ -4060,10 +4071,63 @@ mod tests {
             )
             .expect("lifecycle");
         assert_eq!(lifecycle, (None, None, None));
+        let expanded: i64 = live
+            .query_row("SELECT is_expanded FROM notes WHERE id='old'", [], |row| {
+                row.get(0)
+            })
+            .expect("expanded");
+        assert_eq!(expanded, 0);
         let version: i64 = live
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_backup_restore_collapses_expansion_without_changing_modified_at() {
+        let dir = std::env::temp_dir().join(format!(
+            "treenote-legacy-expanded-restore-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("dir");
+        let backup_path = dir.join("legacy.sqlite3");
+        let backup = Connection::open(&backup_path).expect("backup");
+        backup
+            .execute_batch(
+                "CREATE TABLE notes (
+                    id TEXT PRIMARY KEY,
+                    parent_id TEXT,
+                    label TEXT NOT NULL,
+                    is_expanded INTEGER,
+                    sort_order INTEGER NOT NULL,
+                    content TEXT,
+                    created_at INTEGER,
+                    modified_at INTEGER,
+                    archived_at INTEGER
+                );
+                INSERT INTO notes (
+                    id, parent_id, label, is_expanded, sort_order, content,
+                    created_at, modified_at, archived_at
+                ) VALUES ('old', NULL, 'Old', 1, 0, 'body', 11, 22, 33);",
+            )
+            .expect("version 0 backup");
+        let backup_version: i64 = backup
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("backup version");
+        assert_eq!(backup_version, 0);
+        drop(backup);
+
+        let live = setup_test_conn();
+        restore_notes_from_backup_path(&live, &backup_path).expect("restore");
+        let row: (i64, Option<i64>, Option<i64>, Option<i64>) = live
+            .query_row(
+                "SELECT is_expanded, created_at, modified_at, archived_at FROM notes WHERE id='old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("row");
+        assert_eq!(row, (0, Some(11), Some(22), Some(33)));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -4074,24 +4138,38 @@ mod tests {
         let backup_path = dir.join("current.sqlite3");
         let backup = Connection::open(&backup_path).expect("backup");
         ensure_db_schema(&backup).expect("schema");
-        backup.execute(
-            "INSERT INTO notes (id,parent_id,label,is_expanded,sort_order,content,created_at,modified_at,archived_at)
-             VALUES ('n',NULL,'N',1,0,'body',11,22,33)",
-            [],
-        )
-        .expect("insert");
+        backup
+            .execute_batch(
+                "INSERT INTO notes (id,parent_id,label,is_expanded,sort_order,content,created_at,modified_at,archived_at)
+                 VALUES
+                    ('open',NULL,'Open',1,0,'body',11,22,NULL),
+                    ('closed',NULL,'Closed',0,1,'other',44,55,66);",
+            )
+            .expect("insert");
+        let backup_version: i64 = backup
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("backup version");
+        assert_eq!(backup_version, CURRENT_SCHEMA_VERSION);
         drop(backup);
 
         let live = setup_test_conn();
         restore_notes_from_backup_path(&live, &backup_path).expect("restore");
-        let lifecycle: (Option<i64>, Option<i64>, Option<i64>) = live
+        let open: (i64, Option<i64>, Option<i64>, Option<i64>) = live
             .query_row(
-                "SELECT created_at, modified_at, archived_at FROM notes WHERE id='n'",
+                "SELECT is_expanded, created_at, modified_at, archived_at FROM notes WHERE id='open'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .expect("lifecycle");
-        assert_eq!(lifecycle, (Some(11), Some(22), Some(33)));
+            .expect("open");
+        let closed: (i64, Option<i64>, Option<i64>, Option<i64>) = live
+            .query_row(
+                "SELECT is_expanded, created_at, modified_at, archived_at FROM notes WHERE id='closed'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("closed");
+        assert_eq!(open, (1, Some(11), Some(22), None));
+        assert_eq!(closed, (0, Some(44), Some(55), Some(66)));
         let _ = fs::remove_dir_all(dir);
     }
 
