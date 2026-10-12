@@ -4,7 +4,7 @@ A minimalist plain-text note-taking app with your notes organised in a tree.
 
 ![TreeNote main window showing a note tree and editor](docs/screenshot.png)
 
-Built with Tauri and SQLite. See [DEVELOPERS.md](DEVELOPERS.md) for technical details.
+Built with Tauri and SQLite. See [DEVELOPERS.md](DEVELOPERS.md) for technical details. Coding agents should also read [AGENTS.md](AGENTS.md) before making changes.
 
 ## Features
 
