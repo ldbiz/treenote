@@ -69,8 +69,18 @@ fn update_node(id: String, new_label: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_node_expanded(id: String, expanded: bool) -> Result<(), String> {
+    storage::set_node_expanded(id, expanded)
+}
+
+#[tauri::command]
 fn delete_node(id: String) -> Result<(), String> {
     storage::delete_node(id)
+}
+
+#[tauri::command]
+fn set_node_archived(id: String, archived: bool) -> Result<(), String> {
+    storage::set_node_archived(id, archived)
 }
 
 #[tauri::command]
@@ -81,6 +91,11 @@ fn move_node(id: String, new_parent_id: Option<String>, new_sort_order: i64) -> 
 #[tauri::command]
 fn get_node_content(id: String) -> Result<String, String> {
     storage::get_node_content(id)
+}
+
+#[tauri::command]
+fn get_search_node_data() -> Result<Vec<storage::SearchNodeData>, String> {
+    storage::fetch_search_node_data()
 }
 
 #[tauri::command]
@@ -463,9 +478,12 @@ fn main() {
             get_tree,
             add_node,
             update_node,
+            set_node_expanded,
             delete_node,
+            set_node_archived,
             move_node,
             get_node_content,
+            get_search_node_data,
             update_node_content,
             get_node,
             get_settings,

@@ -48,7 +48,7 @@ interface AppTreeComponentHandle {
   getAllNodeIdsInOrder: () => string[];
   scrollNodeIntoView: (id: string) => void;
   focusNode: (id: string) => void;
-  getAllNodeIdsRecursive: () => string[];
+  getAllNodeIdsRecursive: (includeArchived?: boolean) => string[];
   // clearFilter: () => void; // Removed as TreeComponent no longer has this method
 }
 
@@ -74,6 +74,9 @@ function App() {
 
   // State for tree filtering linked to TextPanel search
   const [isTreeFilterEnabled, setIsTreeFilterEnabled] = useState(false);
+  const [showArchived, setShowArchived] = useState(
+    () => localStorage.getItem("treenote-show-archived") === "true"
+  );
   const [treeFocusNodeIds, setTreeFocusNodeIds] = useState<Set<string> | null>(
     null
   );
@@ -508,29 +511,16 @@ function App() {
 
   const getAllNodeIdsForSearch = useCallback((): string[] => {
     if (treeRef.current) {
-      return treeRef.current.getAllNodeIdsRecursive();
+      return treeRef.current.getAllNodeIdsRecursive(showArchived);
     }
     return [];
-  }, []);
+  }, [showArchived]);
 
-  // New function that gets both node content and label for search
-  const getNodeDataForSearch = useCallback(
-    async (nodeId: string): Promise<{ content: string; label: string }> => {
-      try {
-        // Get both content and node info in parallel
-        const [content, nodeInfo] = await Promise.all([
-          invoke<string>("get_node_content", { id: nodeId }),
-          invoke<{ label: string }>("get_node", { id: nodeId }),
-        ]);
-        return {
-          content: content || "",
-          label: nodeInfo?.label || "",
-        };
-      } catch (error) {
-        console.error(`Failed to get data for node ${nodeId}:`, error);
-        return { content: "", label: "" };
-      }
-    },
+  const getAllNodeDataForSearch = useCallback(
+    (): Promise<Array<{ id: string; content: string; label: string }>> =>
+      invoke<Array<{ id: string; content: string; label: string }>>(
+        "get_search_node_data"
+      ),
     []
   );
 
@@ -562,6 +552,14 @@ function App() {
       return newIsEnabled;
     });
   }, []);
+  const handleToggleShowArchived = useCallback(() => {
+    setShowArchived((current) => {
+      const next = !current;
+      localStorage.setItem("treenote-show-archived", String(next));
+      return next;
+    });
+  }, []);
+
 
   // Callback for TextPanel to report search activity
   const handleSearchActivity = useCallback(
@@ -590,6 +588,7 @@ function App() {
 
   const activeSearchOverall =
     isSearchUIVisible && currentSearchQueryInPanel.trim() !== "";
+  // Filtering narrows whatever scope the tree view currently exposes.
   const isTreeCurrentlyFilteredReal =
     isTreeFilterEnabled && activeSearchOverall;
   const pendingDeleteIsTree =
@@ -706,11 +705,13 @@ function App() {
                 onCanAddChildChange={setCanAddChild}
                 focusNodeIds={treeFocusNodeIds}
                 isTreeCurrentlyFiltered={isTreeCurrentlyFilteredReal}
+                showArchived={showArchived}
+                onToggleShowArchived={handleToggleShowArchived}
                 allNodesWithSearchMatches={
-                  isTreeCurrentlyFilteredReal ? rawMatchingNodeIdsSet : null
+                  activeSearchOverall ? rawMatchingNodeIdsSet : null
                 }
                 searchQuery={
-                  isTreeCurrentlyFilteredReal ? currentSearchQueryInPanel : ""
+                  activeSearchOverall ? currentSearchQueryInPanel : ""
                 }
               />
             )}
@@ -770,8 +771,9 @@ function App() {
               selectedNodeId={selectedNodeId}
               onSearchResultNavigation={handleSearchResultNavigationInApp}
               getAllNodeIds={getAllNodeIdsForSearch}
-              getNodeDataForSearch={getNodeDataForSearch}
+              getAllNodeDataForSearch={getAllNodeDataForSearch}
               isTreeFilterActive={isTreeFilterEnabled}
+              showArchived={showArchived}
               onToggleTreeFilter={handleToggleTreeFilter}
               onSearchActivity={handleSearchActivity}
             />
