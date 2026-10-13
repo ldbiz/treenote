@@ -8,6 +8,7 @@ mod backup_meta;
 mod convert;
 mod data_root;
 mod dev_mode;
+mod housekeeping;
 mod managed_notebook;
 mod notebook_lock;
 mod storage;
@@ -106,6 +107,29 @@ fn get_node(id: String) -> Result<TreeNode, String> {
 #[tauri::command]
 fn update_node_content(id: String, content: String) -> Result<(), String> {
     storage::update_node_content(id, content)
+}
+
+#[tauri::command]
+fn preview_inactive_archive() -> Result<housekeeping::ArchivePreview, String> {
+    storage::preview_inactive_archive()
+}
+
+#[tauri::command]
+fn execute_inactive_archive(previewed_ids: Vec<String>) -> Result<housekeeping::ArchiveSweepResult, String> {
+    storage::execute_inactive_archive(previewed_ids)
+}
+
+#[tauri::command]
+fn run_scheduled_inactive_archive_if_due() -> Result<Option<housekeeping::ArchiveSweepResult>, String> {
+    storage::run_scheduled_inactive_archive_if_due()
+}
+
+#[tauri::command]
+fn update_housekeeping_settings(
+    enabled: bool,
+    archive_after_days: u64,
+) -> Result<storage::PublicSettings, String> {
+    storage::update_housekeeping_settings(enabled, archive_after_days)
 }
 
 #[tauri::command]
@@ -488,6 +512,10 @@ fn main() {
             get_node,
             get_settings,
             update_settings,
+            update_housekeeping_settings,
+            preview_inactive_archive,
+            execute_inactive_archive,
+            run_scheduled_inactive_archive_if_due,
             list_notebooks,
             create_notebook,
             switch_notebook,
