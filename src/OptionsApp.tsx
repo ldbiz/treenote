@@ -51,10 +51,23 @@ type AppSettings = {
   editor_font_family: string;
   minimize_to_tray: boolean;
   backup_before_restore: boolean;
+  housekeeping_auto_archive: boolean;
+  housekeeping_archive_after_days: number;
+};
+
+type ArchivePreview = {
+  days: number;
+  totalNotes: number;
+  candidates: { id: string; label: string; noteCount: number }[];
+};
+type ArchiveSweepResult = {
+  archivedBranches: number;
+  archivedNotes: number;
+  skippedBranches: number;
 };
 
 type MessageKind = "success" | "error" | "info";
-type SectionId = "general" | "appearance" | "notebook" | "conversion" | "backups" | "security";
+type SectionId = "general" | "appearance" | "notebook" | "conversion" | "backups" | "housekeeping" | "security";
 type SectionMessage = { kind: MessageKind; text: string };
 
 function notebookFileName(path: string): string {
@@ -167,6 +180,7 @@ function OptionsApp() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [managedBackups, setManagedBackups] = useState<ManagedBackupEntryLocal[]>([]);
+  const [archivePreview, setArchivePreview] = useState<ArchivePreview | null>(null);
   const [metadataWarning, setMetadataWarning] = useState<string | null>(null);
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
   const [createBackupDialogOpen, setCreateBackupDialogOpen] = useState(false);
@@ -236,6 +250,7 @@ function OptionsApp() {
       invoke<string[]>("list_notebooks"),
     ]);
     setSettings(s);
+    setArchivePreview(null);
     setNotebooks(names);
     setHasPassword(sec.password_configured);
     const family = s.editor_font_family || "system";
@@ -634,6 +649,74 @@ function OptionsApp() {
     } catch (error) {
       showSectionMessage("backups", "error", `Failed to save setting: ${errorText(error)}`);
     }
+  };
+
+  const persistHousekeeping = async (enabled: boolean, days: number) => {
+    if (!settings) return;
+    clearSectionMessage("housekeeping");
+    setArchivePreview(null);
+    try {
+      const saved = await invoke<AppSettings>("update_housekeeping_settings", {
+        enabled,
+        archiveAfterDays: days,
+      });
+      setSettings(saved);
+    } catch (error) {
+      try {
+        setSettings(await invoke<AppSettings>("get_settings"));
+      } catch {
+        // Preserve the previous form state if settings reload also fails.
+      }
+      showSectionMessage("housekeeping", "error", "Failed to save setting: " + errorText(error));
+    }
+  };
+
+  const previewInactiveArchive = async () => {
+    if (!settings) return;
+    setArchivePreview(null);
+    clearSectionMessage("housekeeping");
+    await runAction("previewInactiveArchive", async () => {
+      try {
+        const requestId = createFlushRequestId();
+        writeFlushRequest(requestId);
+        await waitForFlushResult(requestId);
+        const preview = await invoke<ArchivePreview>("preview_inactive_archive");
+        setArchivePreview(preview);
+        if (preview.candidates.length === 0) {
+          showSectionMessage("housekeeping", "info", "No inactive branches currently qualify.");
+        }
+      } catch (error) {
+        showSectionMessage("housekeeping", "error", "Preview failed: " + errorText(error));
+      }
+    });
+  };
+
+  const executeInactiveArchive = async () => {
+    if (!archivePreview) return;
+    const ids = archivePreview.candidates.map((candidate) => candidate.id);
+    clearSectionMessage("housekeeping");
+    await runAction("executeInactiveArchive", async () => {
+      try {
+        const requestId = createFlushRequestId();
+        writeFlushRequest(requestId);
+        await waitForFlushResult(requestId);
+        const result = await invoke<ArchiveSweepResult>("execute_inactive_archive", {
+          previewedIds: ids,
+        });
+        setArchivePreview(null);
+        localStorage.setItem("treenote-housekeeping-archive-result", JSON.stringify({
+          ...result,
+          at: Date.now(),
+        }));
+        const summary = "Archived " + result.archivedBranches + " branches (" +
+          result.archivedNotes + " notes)." +
+          (result.skippedBranches > 0 ? " Skipped " + result.skippedBranches + " branches no longer eligible." : "");
+        showSectionMessage("housekeeping", "success", summary);
+        await loadNotebookCounts();
+      } catch (error) {
+        showSectionMessage("housekeeping", "error", "Archive failed: " + errorText(error));
+      }
+    });
   };
 
   const backupNow = () => {
