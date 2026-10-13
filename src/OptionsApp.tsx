@@ -57,6 +57,7 @@ type AppSettings = {
 
 type ArchivePreview = {
   days: number;
+  notebookPath: string;
   totalNotes: number;
   candidates: { id: string; label: string; noteCount: number }[];
 };
