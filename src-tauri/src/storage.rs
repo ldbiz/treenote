@@ -845,53 +845,52 @@ pub fn update_housekeeping_settings(
 }
 
 /// Preview uses the same backend candidate rules as scheduled execution.
+/// Keep the settings lock until the current notebook's DB has been selected.
 pub fn preview_inactive_archive() -> Result<ArchivePreview, String> {
-    let days = SETTINGS
-        .lock()
-        .map_err(|e| e.to_string())?
-        .housekeeping_archive_after_days;
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
     let conn = db_connection()?;
-    housekeeping::preview(&conn, days, now_millis())
+    let mut preview = housekeeping::preview(&conn, s.housekeeping_archive_after_days, now_millis())?;
+    preview.notebook_path = s.database_path.clone();
+    Ok(preview)
 }
 
 /// Only execute roots explicitly shown in the preview; revalidate atomically.
-pub fn execute_inactive_archive(previewed_ids: Vec<String>) -> Result<ArchiveSweepResult, String> {
-    let days = SETTINGS
-        .lock()
-        .map_err(|e| e.to_string())?
-        .housekeeping_archive_after_days;
+/// Reject a stale preview if the notebook or threshold changed in the meantime.
+pub fn execute_inactive_archive(
+    previewed_ids: Vec<String>,
+    expected_notebook_path: String,
+    expected_days: u64,
+) -> Result<ArchiveSweepResult, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    if s.database_path != expected_notebook_path || s.housekeeping_archive_after_days != expected_days {
+        return Err("The notebook or archive threshold changed. Preview again before archiving.".into());
+    }
     let mut conn = db_connection()?;
-    housekeeping::execute(&mut conn, days, now_millis(), Some(&previewed_ids))
+    housekeeping::execute(&mut conn, s.housekeeping_archive_after_days, now_millis(), Some(&previewed_ids))
 }
 
 /// Once per day per active notebook, only when enabled. Application-owned
 /// scheduling state never changes the logical notebook.
 pub fn run_scheduled_inactive_archive_if_due() -> Result<Option<ArchiveSweepResult>, String> {
-    let (path, days) = {
-        let s = SETTINGS.lock().map_err(|e| e.to_string())?;
-        if !s.housekeeping_auto_archive {
-            return Ok(None);
-        }
-        let now = now_millis();
-        if s.housekeeping_last_run_by_notebook
-            .get(&s.database_path)
-            .is_some_and(|last| now.saturating_sub(*last) < 86_400_000)
-        {
-            return Ok(None);
-        }
-        (s.database_path.clone(), s.housekeeping_archive_after_days)
-    };
-
+    let mut s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    if !s.housekeeping_auto_archive {
+        return Ok(None);
+    }
+    let now = now_millis();
+    if s.housekeeping_last_run_by_notebook
+        .get(&s.database_path)
+        .is_some_and(|last| now.saturating_sub(*last) < 86_400_000)
+    {
+        return Ok(None);
+    }
+    // Serialise with notebook switching, which acquires settings then the DB.
     let result = {
         let mut conn = db_connection()?;
-        housekeeping::execute(&mut conn, days, now_millis(), None)?
+        housekeeping::execute(&mut conn, s.housekeeping_archive_after_days, now, None)?
     };
-
-    let mut s = SETTINGS.lock().map_err(|e| e.to_string())?;
-    if s.database_path == path {
-        s.housekeeping_last_run_by_notebook.insert(path, now_millis());
-        save_settings_to_disk(&s)?;
-    }
+    let path = s.database_path.clone();
+    s.housekeeping_last_run_by_notebook.insert(path, now);
+    save_settings_to_disk(&s)?;
     Ok(Some(result))
 }
 
