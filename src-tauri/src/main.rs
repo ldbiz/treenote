@@ -115,8 +115,8 @@ fn preview_inactive_archive() -> Result<housekeeping::ArchivePreview, String> {
 }
 
 #[tauri::command]
-fn execute_inactive_archive(previewed_ids: Vec<String>) -> Result<housekeeping::ArchiveSweepResult, String> {
-    storage::execute_inactive_archive(previewed_ids)
+fn execute_inactive_archive(previewed_ids: Vec<String>, expected_notebook_path: String, expected_days: u64) -> Result<housekeeping::ArchiveSweepResult, String> {
+    storage::execute_inactive_archive(previewed_ids, expected_notebook_path, expected_days)
 }
 
 #[tauri::command]
