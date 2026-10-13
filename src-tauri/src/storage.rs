@@ -869,18 +869,19 @@ pub fn execute_inactive_archive(
     housekeeping::execute(&mut conn, s.housekeeping_archive_after_days, now_millis(), Some(&previewed_ids))
 }
 
+fn housekeeping_due(s: &AppSettings, now: i64) -> bool {
+    s.housekeeping_auto_archive
+        && !s.housekeeping_last_run_by_notebook
+            .get(&s.database_path)
+            .is_some_and(|last| now.saturating_sub(*last) < 86_400_000)
+}
+
 /// Once per day per active notebook, only when enabled. Application-owned
 /// scheduling state never changes the logical notebook.
 pub fn run_scheduled_inactive_archive_if_due() -> Result<Option<ArchiveSweepResult>, String> {
     let mut s = SETTINGS.lock().map_err(|e| e.to_string())?;
-    if !s.housekeeping_auto_archive {
-        return Ok(None);
-    }
     let now = now_millis();
-    if s.housekeeping_last_run_by_notebook
-        .get(&s.database_path)
-        .is_some_and(|last| now.saturating_sub(*last) < 86_400_000)
-    {
+    if !housekeeping_due(&s, now) {
         return Ok(None);
     }
     // Serialise with notebook switching, which acquires settings then the DB.
@@ -2261,6 +2262,23 @@ mod tests {
         let parsed: AppSettings = serde_json::from_str(json).expect("parse settings");
         assert_eq!(parsed.backup_interval_hours, 24);
         assert_eq!(parsed.backup_retention, 7);
+        assert!(!parsed.housekeeping_auto_archive);
+        assert_eq!(parsed.housekeeping_archive_after_days, 90);
+        assert!(parsed.housekeeping_last_run_by_notebook.is_empty());
+    }
+
+    #[test]
+    fn housekeeping_schedule_is_disabled_by_default_and_scoped_per_notebook() {
+        let mut s = AppSettings::placeholder();
+        s.database_path = "C:/notes/one.sqlite3".into();
+        assert!(!housekeeping_due(&s, 500_000_000));
+        s.housekeeping_auto_archive = true;
+        assert!(housekeeping_due(&s, 500_000_000));
+        s.housekeeping_last_run_by_notebook.insert(s.database_path.clone(), 500_000_000);
+        assert!(!housekeeping_due(&s, 500_000_001));
+        assert!(housekeeping_due(&s, 500_000_000 + 86_400_000));
+        s.database_path = "C:/notes/two.sqlite3".into();
+        assert!(housekeeping_due(&s, 500_000_001));
     }
 
     #[test]
