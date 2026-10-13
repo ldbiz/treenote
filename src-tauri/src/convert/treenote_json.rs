@@ -596,21 +596,21 @@ mod tests {
             created_at: Some(11),
             modified_at: Some(22),
             archived_at: Some(33),
-            last_unarchived_at: None,
+            last_unarchived_at: Some(44),
             children: vec![],
         }];
         export_treenote_json(&json_path, &tree).expect("export");
         import_treenote_json(&json_path, &notebook_path, "C:/other/current.sqlite3")
             .expect("import");
         let conn = Connection::open(&notebook_path).expect("open");
-        let lifecycle: (Option<i64>, Option<i64>, Option<i64>) = conn
+        let lifecycle: (Option<i64>, Option<i64>, Option<i64>, Option<i64>) = conn
             .query_row(
-                "SELECT created_at, modified_at, archived_at FROM notes WHERE id='root'",
+                "SELECT created_at, modified_at, archived_at, last_unarchived_at FROM notes WHERE id='root'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("metadata");
-        assert_eq!(lifecycle, (Some(11), Some(22), Some(33)));
+        assert_eq!(lifecycle, (Some(11), Some(22), Some(33), Some(44)));
         let _ = fs::remove_file(json_path);
         let _ = fs::remove_file(notebook_path);
     }
