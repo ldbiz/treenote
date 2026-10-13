@@ -704,6 +704,8 @@ function OptionsApp() {
         await waitForFlushResult(requestId);
         const result = await invoke<ArchiveSweepResult>("execute_inactive_archive", {
           previewedIds: ids,
+          expectedNotebookPath: archivePreview.notebookPath,
+          expectedDays: archivePreview.days,
         });
         setArchivePreview(null);
         localStorage.setItem("treenote-housekeeping-archive-result", JSON.stringify({
