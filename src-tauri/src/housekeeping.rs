@@ -30,6 +30,7 @@ pub struct ArchiveSweepResult {
     pub archived_branches: usize,
     pub archived_notes: usize,
     pub skipped_branches: usize,
+    pub archived_ids: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -217,6 +218,7 @@ pub fn execute(
         archived_branches: 0,
         archived_notes: 0,
         skipped_branches: 0,
+        archived_ids: Vec::new(),
     };
     let mut seen = HashSet::new();
     let selected: Vec<&ArchiveCandidate> = match previewed_ids {
@@ -244,6 +246,7 @@ pub fn execute(
         if changed == 1 {
             result.archived_branches += 1;
             result.archived_notes += candidate.note_count;
+            result.archived_ids.push(candidate.id.clone());
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
