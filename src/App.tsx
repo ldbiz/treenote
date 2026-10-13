@@ -67,6 +67,7 @@ function App() {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [treeDataRevision, setTreeDataRevision] = useState(0);
   type LockStatus = "unknown" | "locked" | "open";
   const [lockStatus, setLockStatus] = useState<LockStatus>("unknown");
   const [lockPassword, setLockPassword] = useState("");
@@ -163,6 +164,10 @@ function App() {
     },
     [],
   );
+
+  const handleTreeDataLoaded = useCallback(() => {
+    setTreeDataRevision((revision) => revision + 1);
+  }, []);
 
   const handleArchiveApplied = useCallback((archivedIds: string[]) => {
     if (archivedIds.length === 0) return;
@@ -753,6 +758,7 @@ function App() {
                 onActivateNode={handleActivateNode}
                 onExportNode={handleExportNode}
                 onCanAddChildChange={setCanAddChild}
+                onTreeDataLoaded={handleTreeDataLoaded}
                 focusNodeIds={treeFocusNodeIds}
                 isTreeCurrentlyFiltered={isTreeCurrentlyFilteredReal}
                 showArchived={showArchived}
@@ -824,6 +830,7 @@ function App() {
               getAllNodeDataForSearch={getAllNodeDataForSearch}
               isTreeFilterActive={isTreeFilterEnabled}
               showArchived={showArchived}
+              treeDataRevision={treeDataRevision}
               onToggleTreeFilter={handleToggleTreeFilter}
               onSearchActivity={handleSearchActivity}
             />
