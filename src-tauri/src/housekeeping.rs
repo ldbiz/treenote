@@ -20,6 +20,7 @@ pub struct ArchiveCandidate {
 #[serde(rename_all = "camelCase")]
 pub struct ArchivePreview {
     pub days: u64,
+    pub notebook_path: String,
     pub candidates: Vec<ArchiveCandidate>,
     pub total_notes: usize,
 }
@@ -197,6 +198,7 @@ pub fn preview(conn: &Connection, days: u64, now: i64) -> Result<ArchivePreview,
     let total_notes = candidates.iter().map(|c| c.note_count).sum();
     Ok(ArchivePreview {
         days,
+        notebook_path: String::new(),
         candidates,
         total_notes,
     })
