@@ -64,6 +64,7 @@ type ArchiveSweepResult = {
   archivedBranches: number;
   archivedNotes: number;
   skippedBranches: number;
+  archivedIds: string[];
 };
 
 type MessageKind = "success" | "error" | "info";
