@@ -2143,7 +2143,7 @@ fn duplicate_node_in_conn(conn: &mut Connection, id: &str) -> rusqlite::Result<T
 }
 
 fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportNode> {
-    let (node_id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at): (
+    let (node_id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at, last_unarchived_at): (
         String,
         Option<String>,
         String,
@@ -2153,8 +2153,9 @@ fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportN
         Option<i64>,
         Option<i64>,
         Option<i64>,
+        Option<i64>,
     ) = conn.query_row(
-        "SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded, created_at, modified_at, archived_at FROM notes WHERE id=?1",
+        "SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded, created_at, modified_at, archived_at, last_unarchived_at FROM notes WHERE id=?1",
         params![id],
         |row| {
             Ok((
@@ -2167,6 +2168,7 @@ fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportN
                 row.get(6)?,
                 row.get(7)?,
                 row.get(8)?,
+                row.get(9)?,
             ))
         },
     )?;
@@ -2181,6 +2183,7 @@ fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportN
         created_at,
         modified_at,
         archived_at,
+        last_unarchived_at,
         children,
     })
 }
@@ -2780,6 +2783,9 @@ mod tests {
             editor_font_family: "system".into(),
             minimize_to_tray: true,
             backup_before_restore: true,
+            housekeeping_auto_archive: false,
+            housekeeping_archive_after_days: housekeeping::DEFAULT_ARCHIVE_DAYS,
+            housekeeping_last_run_by_notebook: HashMap::new(),
         }
     }
 
@@ -3081,6 +3087,9 @@ mod tests {
             editor_font_family: "system".into(),
             minimize_to_tray: true,
             backup_before_restore: true,
+            housekeeping_auto_archive: false,
+            housekeeping_archive_after_days: housekeeping::DEFAULT_ARCHIVE_DAYS,
+            housekeeping_last_run_by_notebook: HashMap::new(),
         })
         .expect("serialize original");
         fs::write(&settings_file, &original).expect("write original");
