@@ -719,7 +719,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(dest);
     }
