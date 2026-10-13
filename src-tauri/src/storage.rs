@@ -3939,6 +3939,67 @@ mod tests {
     }
 
     #[test]
+    fn v1_to_v2_adds_usage_fields_without_fabricating_dates_or_expansion() {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                label TEXT NOT NULL,
+                is_expanded INTEGER,
+                sort_order INTEGER NOT NULL,
+                content TEXT,
+                created_at INTEGER,
+                modified_at INTEGER,
+                archived_at INTEGER
+            );
+            PRAGMA user_version=1;
+            INSERT INTO notes VALUES ('old', NULL, 'Old', 1, 0, '', NULL, NULL, NULL);",
+        )
+        .expect("v1 notebook");
+        ensure_db_schema(&conn).expect("upgrade");
+        let values: (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT is_expanded, created_at, modified_at, last_accessed_at, last_unarchived_at FROM notes WHERE id='old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("metadata");
+        assert_eq!(values, (1, None, None, None, None));
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        ensure_db_schema(&conn).expect("reopen");
+        let expanded: i64 = conn.query_row(
+            "SELECT is_expanded FROM notes WHERE id='old'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(expanded, 1);
+    }
+
+    #[test]
+    fn unarchive_records_explicit_protection_without_stamping_descendants() {
+        let conn = setup_test_conn();
+        insert_test_node(&conn, "parent", None, "Parent", 0, "");
+        insert_test_node(&conn, "child", Some("parent"), "Child", 0, "");
+        set_node_archived_in_conn(&conn, "parent", true).expect("archive");
+        set_node_archived_in_conn(&conn, "parent", false).expect("unarchive");
+        let (parent_modified, protection): (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT modified_at, last_unarchived_at FROM notes WHERE id='parent'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert!(protection.is_some());
+        assert_eq!(parent_modified, protection);
+        let child: (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT modified_at, last_unarchived_at FROM notes WHERE id='child'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(child, (None, None));
+    }
+
+    #[test]
     fn existing_version_one_database_keeps_expansion_state() {
         let conn = Connection::open_in_memory().expect("db");
         ensure_db_schema(&conn).expect("create v1");
