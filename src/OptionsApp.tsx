@@ -1165,6 +1165,96 @@ function OptionsApp() {
         />
 
         <OptionsSection
+          title="Housekeeping"
+          description="Move inactive branches out of the active tree without deleting notes."
+          status={sectionMessages.housekeeping}
+        >
+          <label className="options-field options-checkbox-field">
+            <input
+              type="checkbox"
+              className="options-checkbox"
+              checked={settings?.housekeeping_auto_archive ?? false}
+              disabled={isAnyBusy || !settings}
+              onChange={(event) => {
+                if (!settings) return;
+                void persistHousekeeping(event.target.checked, settings.housekeeping_archive_after_days);
+              }}
+            />
+            <span className="options-checkbox-label">Automatically archive inactive branches</span>
+          </label>
+          <p className="options-field-hint">
+            Optional. Checks approximately daily while TreeNote is running.
+            A branch qualifies only if it and all its visible descendants have been inactive.
+          </p>
+          <label className="options-field">
+            <span className="options-field-label">Inactive for</span>
+            <select
+              className="options-control"
+              value={settings?.housekeeping_archive_after_days ?? 90}
+              disabled={isAnyBusy || !settings}
+              onChange={(event) => {
+                if (!settings) return;
+                void persistHousekeeping(settings.housekeeping_auto_archive, Number(event.target.value));
+              }}
+            >
+              {[30, 60, 90, 180, 365, 730].map((days) => (
+                <option key={days} value={days}>{days} days</option>
+              ))}
+            </select>
+          </label>
+          <p className="options-field-hint">
+            Reading or editing a note counts as activity. Legacy notes with unknown dates
+            are eligible. Manually unarchived branches are protected for a full threshold period.
+          </p>
+          <div className="options-actions">
+            <button
+              type="button"
+              className="options-btn options-btn-secondary"
+              disabled={isAnyBusy || loading || !settings}
+              onClick={() => void previewInactiveArchive()}
+            >
+              {isBusy("previewInactiveArchive") ? "Checking…" : "Preview inactive branches…"}
+            </button>
+          </div>
+          {archivePreview && archivePreview.candidates.length > 0 && (
+            <div className="options-field" role="region" aria-label="Archive preview">
+              <p className="options-field-label">
+                {archivePreview.candidates.length} qualifying branches
+                {" "}({archivePreview.totalNotes} notes)
+              </p>
+              <ul style={{ maxHeight: 240, overflowY: "auto", marginBlock: 8, paddingLeft: 25 }}>
+                {archivePreview.candidates.map((candidate) => (
+                  <li key={candidate.id}>
+                    {candidate.label} — {candidate.noteCount} {candidate.noteCount === 1 ? "note" : "notes"}
+                  </li>
+                ))}
+              </ul>
+              <p className="options-field-hint">
+                Only these branches will be considered. Each is rechecked before archiving.
+              </p>
+              <div className="options-actions">
+                <button
+                  type="button"
+                  className="options-btn options-btn-primary"
+                  disabled={isAnyBusy}
+                  onClick={() => void executeInactiveArchive()}
+                >
+                  {isBusy("executeInactiveArchive") ? "Archiving…" : "Archive these branches"}
+                </button>
+                <button
+                  type="button"
+                  className="options-btn options-btn-secondary"
+                  disabled={isAnyBusy}
+                  onClick={() => setArchivePreview(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </OptionsSection>
+
+        <OptionsSection
           title="Security"
           description="Protect Tree Note with an app lock on this device."
           status={sectionMessages.security}
