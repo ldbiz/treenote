@@ -792,6 +792,7 @@ interface TreeComponentProps {
   searchQuery?: string; // Add searchQuery prop for label highlighting
   reloadKey?: number;
   onCanAddChildChange?: (canAddChild: boolean) => void;
+  onTreeDataLoaded?: () => void;
 }
 
 interface TreeComponentHandle {
@@ -869,6 +870,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       searchQuery, // Add searchQuery prop for label highlighting
       reloadKey,
       onCanAddChildChange,
+      onTreeDataLoaded,
     },
     ref
   ) => {
@@ -1053,6 +1055,12 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
       };
       loadTreeData();
     }, [reloadKey]);
+
+    // Notify the editor after the newly loaded tree has committed, so an
+    // active search can rerun against the updated archive visibility.
+    useEffect(() => {
+      if (!loading && !error) onTreeDataLoaded?.();
+    }, [loading, error, onTreeDataLoaded]);
 
     // --- ALL HOOKS MUST BE CALLED BEFORE THIS POINT ---
 
