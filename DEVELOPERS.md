@@ -53,7 +53,7 @@ The production build deliberately disables WebView developer tools and browser a
 
 TreeNote's configured data root contains `notebooks/`, `backups/`, `exports/` and `settings.json`. One notebook is active per running app instance. Ordinary notebook creation/switching is limited to managed `.sqlite3` files directly inside `notebooks/`.
 
-The current notes schema is version 1 and contains hierarchy, plain-text content, persisted expansion state, and lifecycle/archive metadata. See [AGENTS.md](AGENTS.md) for the invariants around migrations, `modified_at`, archive inheritance and expansion persistence.
+The current notes schema is version 2 and contains hierarchy, plain-text content, persisted expansion state, lifecycle/archive metadata, local `last_accessed_at` and logical `last_unarchived_at`. Automatic inactive-branch archiving is optional; manual preview and execution are available in Settings → Housekeeping. The default inactivity threshold is 90 days. Legacy creation/modification timestamps remain `NULL` rather than being invented. See [AGENTS.md](AGENTS.md) for the invariants around migrations, `modified_at`, archive inheritance and expansion persistence.
 
 The app-lock password protects UI access only; the SQLite file itself is not encrypted.
 
