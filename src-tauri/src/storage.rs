@@ -854,6 +854,26 @@ pub fn preview_inactive_archive() -> Result<ArchivePreview, String> {
     Ok(preview)
 }
 
+/// Read the text of one selected candidate and all of its descendants for
+/// the Settings preview. This intentionally does NOT record last_accessed_at:
+/// inspecting the housekeeping preview is not ordinary note reading.
+pub fn preview_inactive_branch_contents(
+    root_id: String,
+    expected_notebook_path: String,
+    expected_days: u64,
+) -> Result<String, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    if s.database_path != expected_notebook_path || s.housekeeping_archive_after_days != expected_days {
+        return Err("The notebook or archive threshold changed. Preview again before archiving.".into());
+    }
+    let conn = db_connection()?;
+    let current = housekeeping::preview(&conn, expected_days, now_millis())?;
+    if !current.candidates.iter().any(|candidate| candidate.id == root_id) {
+        return Err("This branch has changed or no longer qualifies. Refresh the housekeeping preview.".into());
+    }
+    housekeeping::preview_branch_text(&conn, &root_id)
+}
+
 /// Only execute roots explicitly shown in the preview; revalidate atomically.
 /// Reject a stale preview if the notebook or threshold changed in the meantime.
 pub fn execute_inactive_archive(
