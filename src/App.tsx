@@ -34,6 +34,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 // Assuming TreeComponentHandle is implicitly imported or defined in Tree.tsx
 // and App.tsx can infer it correctly. If not, we might need an explicit import type.
 // For the ref, let's define the handle type explicitly for clarity if needed.
+interface ArchiveSweepResult {
+  archivedBranches: number;
+  archivedNotes: number;
+  skippedBranches: number;
+  archivedIds: string[];
+}
+
 interface AppTreeComponentHandle {
   moveNodeUp: (id: string) => void;
   moveNodeDown: (id: string) => void;
@@ -60,6 +67,7 @@ function App() {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [treeDataRevision, setTreeDataRevision] = useState(0);
   type LockStatus = "unknown" | "locked" | "open";
   const [lockStatus, setLockStatus] = useState<LockStatus>("unknown");
   const [lockPassword, setLockPassword] = useState("");
@@ -71,6 +79,7 @@ function App() {
   const isResizing = useRef(false);
   const treeRef = useRef<AppTreeComponentHandle | null>(null);
   const textPanelRef = useRef<TextPanelHandle | null>(null);
+  const scheduledCheckRunning = useRef(false);
 
   // State for tree filtering linked to TextPanel search
   const [isTreeFilterEnabled, setIsTreeFilterEnabled] = useState(false);
@@ -156,6 +165,26 @@ function App() {
     [],
   );
 
+  const handleTreeDataLoaded = useCallback(() => {
+    setTreeDataRevision((revision) => revision + 1);
+  }, []);
+
+  const handleArchiveApplied = useCallback((archivedIds: string[]) => {
+    if (archivedIds.length === 0) return;
+    const roots = new Set(archivedIds);
+    setSelectedNodeId((selected) => {
+      let current = selected;
+      const visited = new Set<string>();
+      while (current && !visited.has(current)) {
+        if (roots.has(current)) return null;
+        visited.add(current);
+        current = treeRef.current?.getParentId(current) ?? null;
+      }
+      return selected;
+    });
+    setReloadKey((key) => key + 1);
+  }, []);
+
   useEffect(() => {
     void Promise.all([invoke<{ password_configured: boolean }>("security_status"), invoke<{ editor_font_family: string }>("get_settings")])
       .then(([sec, settings]) => {
@@ -199,6 +228,14 @@ function App() {
           );
         }
       }
+      if (event.key === "treenote-housekeeping-archive-result" && event.newValue) {
+        try {
+          const result = JSON.parse(event.newValue) as ArchiveSweepResult;
+          if (Array.isArray(result.archivedIds)) handleArchiveApplied(result.archivedIds);
+        } catch {
+          /* ignore malformed archive event */
+        }
+      }
       if (event.key === FLUSH_REQUEST_KEY && event.newValue) {
         try {
           const request = JSON.parse(event.newValue) as FlushRequest;
@@ -227,23 +264,41 @@ function App() {
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [handleNotebookSwitchRequest, handleBackupRestoreRequest, setEditorFontFamily]);
+  }, [handleNotebookSwitchRequest, handleBackupRestoreRequest, handleArchiveApplied, setEditorFontFamily]);
 
   useEffect(() => {
-    const checkBackups = () => {
+    const checkMaintenance = () => {
+      if (scheduledCheckRunning.current) return;
+      scheduledCheckRunning.current = true;
       void (async () => {
         try {
           await textPanelRef.current?.flushPendingEdit();
-          await invoke("run_scheduled_backup_if_due");
+          try {
+            await invoke("run_scheduled_backup_if_due");
+          } catch (error) {
+            console.error("Scheduled backup check failed:", error);
+          }
+          if (lockStatus === "open") {
+            try {
+              const archived = await invoke<ArchiveSweepResult | null>(
+                "run_scheduled_inactive_archive_if_due",
+              );
+              if (archived) handleArchiveApplied(archived.archivedIds);
+            } catch (error) {
+              console.error("Scheduled housekeeping check failed:", error);
+            }
+          }
         } catch (error) {
-          console.error("Scheduled backup check failed:", error);
+          console.error("Couldn't save the current note before maintenance:", error);
+        } finally {
+          scheduledCheckRunning.current = false;
         }
       })();
     };
-    checkBackups();
-    const interval = window.setInterval(checkBackups, 60_000);
+    checkMaintenance();
+    const interval = window.setInterval(checkMaintenance, 60_000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [lockStatus, handleArchiveApplied]);
 
   useEffect(() => {
     let unlistenClose: (() => void) | undefined;
@@ -703,6 +758,7 @@ function App() {
                 onActivateNode={handleActivateNode}
                 onExportNode={handleExportNode}
                 onCanAddChildChange={setCanAddChild}
+                onTreeDataLoaded={handleTreeDataLoaded}
                 focusNodeIds={treeFocusNodeIds}
                 isTreeCurrentlyFiltered={isTreeCurrentlyFilteredReal}
                 showArchived={showArchived}
@@ -774,6 +830,7 @@ function App() {
               getAllNodeDataForSearch={getAllNodeDataForSearch}
               isTreeFilterActive={isTreeFilterEnabled}
               showArchived={showArchived}
+              treeDataRevision={treeDataRevision}
               onToggleTreeFilter={handleToggleTreeFilter}
               onSearchActivity={handleSearchActivity}
             />

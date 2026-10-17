@@ -6,6 +6,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -24,6 +25,7 @@ use crate::backup_meta::{
 };
 use crate::atomic_file;
 use crate::data_root::{self, DEFAULT_NOTEBOOK_FILENAME};
+use crate::housekeeping::{self, ArchivePreview, ArchiveSweepResult};
 use crate::managed_notebook;
 use crate::notebook_lock::{self, NotebookLock};
 use crate::tree::TreeNode;
@@ -38,7 +40,9 @@ CREATE TABLE IF NOT EXISTS notes (
     content TEXT,
     created_at INTEGER,
     modified_at INTEGER,
-    archived_at INTEGER
+    archived_at INTEGER,
+    last_accessed_at INTEGER,
+    last_unarchived_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS notes_parent_id_idx ON notes(parent_id);";
 
@@ -61,8 +65,10 @@ const CURRENT_NOTES_COLUMNS: &[&str] = &[
     "created_at",
     "modified_at",
     "archived_at",
+    "last_accessed_at",
+    "last_unarchived_at",
 ];
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 const RESTORE_ATTACH_ALIAS: &str = "restore_src";
 
@@ -80,6 +86,12 @@ pub struct AppSettings {
     pub minimize_to_tray: bool,
     #[serde(default = "default_backup_before_restore")]
     pub backup_before_restore: bool,
+    #[serde(default)]
+    pub housekeeping_auto_archive: bool,
+    #[serde(default = "default_archive_days")]
+    pub housekeeping_archive_after_days: u64,
+    #[serde(default)]
+    pub housekeeping_last_run_by_notebook: HashMap<String, i64>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -89,6 +101,8 @@ pub struct PublicSettings {
     pub editor_font_family: String,
     pub minimize_to_tray: bool,
     pub backup_before_restore: bool,
+    pub housekeeping_auto_archive: bool,
+    pub housekeeping_archive_after_days: u64,
 }
 
 impl AppSettings {
@@ -102,6 +116,9 @@ impl AppSettings {
             editor_font_family: "system".to_string(),
             minimize_to_tray: true,
             backup_before_restore: true,
+            housekeeping_auto_archive: false,
+            housekeeping_archive_after_days: housekeeping::DEFAULT_ARCHIVE_DAYS,
+            housekeeping_last_run_by_notebook: HashMap::new(),
         }
     }
 }
@@ -113,6 +130,8 @@ fn public_settings_from(s: AppSettings) -> Result<PublicSettings, String> {
         editor_font_family: s.editor_font_family,
         minimize_to_tray: s.minimize_to_tray,
         backup_before_restore: s.backup_before_restore,
+        housekeeping_auto_archive: s.housekeeping_auto_archive,
+        housekeeping_archive_after_days: s.housekeeping_archive_after_days,
     })
 }
 
@@ -173,6 +192,10 @@ fn default_backup_before_restore() -> bool {
     true
 }
 
+fn default_archive_days() -> u64 {
+    housekeeping::DEFAULT_ARCHIVE_DAYS
+}
+
 fn new_password_hash(password: &str) -> Result<String, String> {
     // App-lock only: this Argon2id PHC string gates UI access. The SQLite database file is not encrypted.
     let salt_bytes = Uuid::new_v4().into_bytes();
@@ -214,6 +237,8 @@ pub(crate) fn ensure_db_schema(conn: &Connection) -> rusqlite::Result<()> {
         ("created_at", "ALTER TABLE notes ADD COLUMN created_at INTEGER"),
         ("modified_at", "ALTER TABLE notes ADD COLUMN modified_at INTEGER"),
         ("archived_at", "ALTER TABLE notes ADD COLUMN archived_at INTEGER"),
+        ("last_accessed_at", "ALTER TABLE notes ADD COLUMN last_accessed_at INTEGER"),
+        ("last_unarchived_at", "ALTER TABLE notes ADD COLUMN last_unarchived_at INTEGER"),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute_batch(sql)?;
@@ -246,6 +271,9 @@ fn default_settings_on(data_root: &Path) -> AppSettings {
         editor_font_family: "system".to_string(),
         minimize_to_tray: true,
         backup_before_restore: true,
+        housekeeping_auto_archive: false,
+        housekeeping_archive_after_days: housekeeping::DEFAULT_ARCHIVE_DAYS,
+        housekeeping_last_run_by_notebook: HashMap::new(),
     }
 }
 
@@ -266,6 +294,9 @@ fn normalize_settings_on(mut s: AppSettings, data_root: &Path) -> AppSettings {
     }
     if s.editor_font_family.is_empty() {
         s.editor_font_family = "system".into();
+    }
+    if !(1..=36_500).contains(&s.housekeeping_archive_after_days) {
+        s.housekeeping_archive_after_days = housekeeping::DEFAULT_ARCHIVE_DAYS;
     }
     s
 }
@@ -799,6 +830,89 @@ pub fn update_settings(
     public_settings_from(s.clone())
 }
 
+pub fn update_housekeeping_settings(
+    enabled: bool,
+    archive_after_days: u64,
+) -> Result<PublicSettings, String> {
+    if !(1..=36_500).contains(&archive_after_days) {
+        return Err("Archive threshold must be between 1 and 36500 days".into());
+    }
+    let mut s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    s.housekeeping_auto_archive = enabled;
+    s.housekeeping_archive_after_days = archive_after_days;
+    save_settings_to_disk(&s)?;
+    public_settings_from(s.clone())
+}
+
+/// Preview uses the same backend candidate rules as scheduled execution.
+/// Keep the settings lock until the current notebook's DB has been selected.
+pub fn preview_inactive_archive() -> Result<ArchivePreview, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    let conn = db_connection()?;
+    let mut preview = housekeeping::preview(&conn, s.housekeeping_archive_after_days, now_millis())?;
+    preview.notebook_path = s.database_path.clone();
+    Ok(preview)
+}
+
+/// Read the text of one selected candidate and all of its descendants for
+/// the Settings preview. This intentionally does NOT record last_accessed_at:
+/// inspecting the housekeeping preview is not ordinary note reading.
+pub fn preview_inactive_branch_contents(
+    root_id: String,
+    expected_notebook_path: String,
+    expected_days: u64,
+) -> Result<String, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    if s.database_path != expected_notebook_path || s.housekeeping_archive_after_days != expected_days {
+        return Err("The notebook or archive threshold changed. Preview again before archiving.".into());
+    }
+    let conn = db_connection()?;
+    // Inspect the specified branch without a notebook-wide eligibility scan.
+    // Executing an archive still revalidates the selected roots transactionally.
+    housekeeping::preview_branch_text(&conn, &root_id)
+}
+
+/// Only execute roots explicitly shown in the preview; revalidate atomically.
+/// Reject a stale preview if the notebook or threshold changed in the meantime.
+pub fn execute_inactive_archive(
+    previewed_ids: Vec<String>,
+    expected_notebook_path: String,
+    expected_days: u64,
+) -> Result<ArchiveSweepResult, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    if s.database_path != expected_notebook_path || s.housekeeping_archive_after_days != expected_days {
+        return Err("The notebook or archive threshold changed. Preview again before archiving.".into());
+    }
+    let mut conn = db_connection()?;
+    housekeeping::execute(&mut conn, s.housekeeping_archive_after_days, now_millis(), Some(&previewed_ids))
+}
+
+fn housekeeping_due(s: &AppSettings, now: i64) -> bool {
+    s.housekeeping_auto_archive
+        && !s.housekeeping_last_run_by_notebook
+            .get(&s.database_path)
+            .is_some_and(|last| now.saturating_sub(*last) < 86_400_000)
+}
+
+/// Once per day per active notebook, only when enabled. Application-owned
+/// scheduling state never changes the logical notebook.
+pub fn run_scheduled_inactive_archive_if_due() -> Result<Option<ArchiveSweepResult>, String> {
+    let mut s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    let now = now_millis();
+    if !housekeeping_due(&s, now) {
+        return Ok(None);
+    }
+    // Serialise with notebook switching, which acquires settings then the DB.
+    let result = {
+        let mut conn = db_connection()?;
+        housekeeping::execute(&mut conn, s.housekeeping_archive_after_days, now, None)?
+    };
+    let path = s.database_path.clone();
+    s.housekeeping_last_run_by_notebook.insert(path, now);
+    save_settings_to_disk(&s)?;
+    Ok(Some(result))
+}
+
 pub fn minimize_to_tray_enabled() -> bool {
     SETTINGS
         .lock()
@@ -860,10 +974,11 @@ struct ExportNode {
     modified_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     archived_at: Option<i64>,
+    last_unarchived_at: Option<i64>,
     children: Vec<ExportNode>,
 }
 fn export_nodes(conn: &Connection, parent_id: Option<&str>) -> rusqlite::Result<Vec<ExportNode>> {
-    let mut stmt = conn.prepare("SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded, created_at, modified_at, archived_at FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC")?;
+    let mut stmt = conn.prepare("SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded, created_at, modified_at, archived_at, last_unarchived_at FROM notes WHERE parent_id IS ?1 ORDER BY sort_order ASC")?;
     let rows = stmt.query_map(params![parent_id], |row| {
         let id: String = row.get(0)?;
         Ok((
@@ -876,11 +991,12 @@ fn export_nodes(conn: &Connection, parent_id: Option<&str>) -> rusqlite::Result<
             row.get::<_, Option<i64>>(6)?,
             row.get::<_, Option<i64>>(7)?,
             row.get::<_, Option<i64>>(8)?,
+            row.get::<_, Option<i64>>(9)?,
         ))
     })?;
     let mut out = Vec::new();
     for r in rows {
-        let (id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at) = r?;
+        let (id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at, last_unarchived_at) = r?;
         let children = export_nodes(conn, Some(&id))?;
         out.push(ExportNode {
             id,
@@ -892,6 +1008,7 @@ fn export_nodes(conn: &Connection, parent_id: Option<&str>) -> rusqlite::Result<
             created_at,
             modified_at,
             archived_at,
+            last_unarchived_at,
             children,
         });
     }
@@ -1802,14 +1919,31 @@ fn move_node_in_conn(
 
     tx.commit().map_err(|e| e.to_string())
 }
+const ACCESS_WRITE_INTERVAL_MS: i64 = 3_600_000; // coalesce repeated selections
+
+fn record_node_access_in_conn(conn: &Connection, id: &str, now: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE notes SET last_accessed_at=?1 WHERE id=?2 AND \
+         (last_accessed_at IS NULL OR last_accessed_at <= ?3)",
+        params![now, id, now.saturating_sub(ACCESS_WRITE_INTERVAL_MS)],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn get_node_content(id: String) -> Result<String, String> {
     let conn = db_connection()?;
-    conn.query_row(
-        "SELECT COALESCE(content,'') FROM notes WHERE id=?1",
-        params![id],
-        |r| r.get(0),
-    )
-    .map_err(|e| e.to_string())
+    // Called when the editor deliberately opens a selected note, not for
+    // background search, tree rendering, backup, import or export.
+    let content: String = conn
+        .query_row(
+            "SELECT COALESCE(content,'') FROM notes WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    record_node_access_in_conn(&conn, &id, now_millis())?;
+    Ok(content)
 }
 
 #[derive(Debug, Serialize)]
@@ -1888,7 +2022,7 @@ fn set_node_archived_in_conn(conn: &Connection, id: &str, archived: bool) -> Res
         )
     } else {
         conn.execute(
-            "UPDATE notes SET archived_at=NULL, modified_at=?1 WHERE id=?2 AND archived_at IS NOT NULL",
+            "UPDATE notes SET archived_at=NULL, modified_at=?1, last_unarchived_at=?1 WHERE id=?2 AND archived_at IS NOT NULL",
             params![now, id],
         )
     }
@@ -2027,7 +2161,7 @@ fn duplicate_node_in_conn(conn: &mut Connection, id: &str) -> rusqlite::Result<T
 }
 
 fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportNode> {
-    let (node_id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at): (
+    let (node_id, parent_id, label, content, sort_order, expanded, created_at, modified_at, archived_at, last_unarchived_at): (
         String,
         Option<String>,
         String,
@@ -2037,8 +2171,9 @@ fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportN
         Option<i64>,
         Option<i64>,
         Option<i64>,
+        Option<i64>,
     ) = conn.query_row(
-        "SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded, created_at, modified_at, archived_at FROM notes WHERE id=?1",
+        "SELECT id, parent_id, label, COALESCE(content,''), sort_order, is_expanded, created_at, modified_at, archived_at, last_unarchived_at FROM notes WHERE id=?1",
         params![id],
         |row| {
             Ok((
@@ -2051,6 +2186,7 @@ fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportN
                 row.get(6)?,
                 row.get(7)?,
                 row.get(8)?,
+                row.get(9)?,
             ))
         },
     )?;
@@ -2065,6 +2201,7 @@ fn export_single_branch(conn: &Connection, id: &str) -> rusqlite::Result<ExportN
         created_at,
         modified_at,
         archived_at,
+        last_unarchived_at,
         children,
     })
 }
@@ -2146,6 +2283,23 @@ mod tests {
         let parsed: AppSettings = serde_json::from_str(json).expect("parse settings");
         assert_eq!(parsed.backup_interval_hours, 24);
         assert_eq!(parsed.backup_retention, 7);
+        assert!(!parsed.housekeeping_auto_archive);
+        assert_eq!(parsed.housekeeping_archive_after_days, 90);
+        assert!(parsed.housekeeping_last_run_by_notebook.is_empty());
+    }
+
+    #[test]
+    fn housekeeping_schedule_is_disabled_by_default_and_scoped_per_notebook() {
+        let mut s = AppSettings::placeholder();
+        s.database_path = "C:/notes/one.sqlite3".into();
+        assert!(!housekeeping_due(&s, 500_000_000));
+        s.housekeeping_auto_archive = true;
+        assert!(housekeeping_due(&s, 500_000_000));
+        s.housekeeping_last_run_by_notebook.insert(s.database_path.clone(), 500_000_000);
+        assert!(!housekeeping_due(&s, 500_000_001));
+        assert!(housekeeping_due(&s, 500_000_000 + 86_400_000));
+        s.database_path = "C:/notes/two.sqlite3".into();
+        assert!(housekeeping_due(&s, 500_000_001));
     }
 
     #[test]
@@ -2525,6 +2679,28 @@ mod tests {
     }
 
     #[test]
+    fn access_is_throttled_and_does_not_stamp_modified_at() {
+        let conn = setup_test_conn();
+        insert_test_node(&conn, "opened", None, "Opened", 0, "");
+        conn.execute("UPDATE notes SET modified_at=123 WHERE id='opened'", []).unwrap();
+        record_node_access_in_conn(&conn, "opened", 9_000_000).unwrap();
+        record_node_access_in_conn(&conn, "opened", 9_100_000).unwrap();
+        let (modified, accessed): (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT modified_at, last_accessed_at FROM notes WHERE id='opened'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!((modified, accessed), (Some(123), Some(9_000_000)));
+        record_node_access_in_conn(&conn, "opened", 13_000_000).unwrap();
+        let accessed: Option<i64> = conn.query_row(
+            "SELECT last_accessed_at FROM notes WHERE id='opened'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(accessed, Some(13_000_000));
+    }
+
+    #[test]
     fn delete_node_removes_the_entire_branch_only() {
         let mut conn = setup_test_conn();
         insert_test_node(&conn, "root", None, "Root", 0, "root");
@@ -2625,6 +2801,9 @@ mod tests {
             editor_font_family: "system".into(),
             minimize_to_tray: true,
             backup_before_restore: true,
+            housekeeping_auto_archive: false,
+            housekeeping_archive_after_days: housekeeping::DEFAULT_ARCHIVE_DAYS,
+            housekeeping_last_run_by_notebook: HashMap::new(),
         }
     }
 
@@ -2926,6 +3105,9 @@ mod tests {
             editor_font_family: "system".into(),
             minimize_to_tray: true,
             backup_before_restore: true,
+            housekeeping_auto_archive: false,
+            housekeeping_archive_after_days: housekeeping::DEFAULT_ARCHIVE_DAYS,
+            housekeeping_last_run_by_notebook: HashMap::new(),
         })
         .expect("serialize original");
         fs::write(&settings_file, &original).expect("write original");
@@ -3798,6 +3980,67 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v1_to_v2_adds_usage_fields_without_fabricating_dates_or_expansion() {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                label TEXT NOT NULL,
+                is_expanded INTEGER,
+                sort_order INTEGER NOT NULL,
+                content TEXT,
+                created_at INTEGER,
+                modified_at INTEGER,
+                archived_at INTEGER
+            );
+            PRAGMA user_version=1;
+            INSERT INTO notes VALUES ('old', NULL, 'Old', 1, 0, '', NULL, NULL, NULL);",
+        )
+        .expect("v1 notebook");
+        ensure_db_schema(&conn).expect("upgrade");
+        let values: (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT is_expanded, created_at, modified_at, last_accessed_at, last_unarchived_at FROM notes WHERE id='old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("metadata");
+        assert_eq!(values, (1, None, None, None, None));
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        ensure_db_schema(&conn).expect("reopen");
+        let expanded: i64 = conn.query_row(
+            "SELECT is_expanded FROM notes WHERE id='old'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(expanded, 1);
+    }
+
+    #[test]
+    fn unarchive_records_explicit_protection_without_stamping_descendants() {
+        let conn = setup_test_conn();
+        insert_test_node(&conn, "parent", None, "Parent", 0, "");
+        insert_test_node(&conn, "child", Some("parent"), "Child", 0, "");
+        set_node_archived_in_conn(&conn, "parent", true).expect("archive");
+        set_node_archived_in_conn(&conn, "parent", false).expect("unarchive");
+        let (parent_modified, protection): (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT modified_at, last_unarchived_at FROM notes WHERE id='parent'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert!(protection.is_some());
+        assert_eq!(parent_modified, protection);
+        let child: (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT modified_at, last_unarchived_at FROM notes WHERE id='child'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(child, (None, None));
     }
 
     #[test]

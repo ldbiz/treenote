@@ -36,6 +36,10 @@ The production build deliberately disables WebView developer tools and browser a
 - `src/App.tsx` — top-level application state/coordination
 - `src/components/Tree.tsx` — tree interaction/rendering, filtering and archive visibility
 - `src/components/TextPanel.tsx` — editor and search
+- `src/OptionsApp.tsx` — Settings, including archive scheduling and launcher
+- `src/HousekeepingReviewApp.tsx` / `housekeeping.html` — independent, resizable archive-review window
+- `src/lib/archiveReviewSession.ts` — fixed candidate groups, reviewed/kept/archived selection state
+- `src/lib/openHousekeepingReview.ts` — create or focus the singleton review window
 - `src/lib/tree.ts` — frontend wrappers around Tauri tree commands
 - `src/lib/treeDepth.ts` — shared 20-level nesting cap (`MAX_TREE_LEVEL`)
 - `src-tauri/` — Rust backend
@@ -53,7 +57,7 @@ The production build deliberately disables WebView developer tools and browser a
 
 TreeNote's configured data root contains `notebooks/`, `backups/`, `exports/` and `settings.json`. One notebook is active per running app instance. Ordinary notebook creation/switching is limited to managed `.sqlite3` files directly inside `notebooks/`.
 
-The current notes schema is version 1 and contains hierarchy, plain-text content, persisted expansion state, and lifecycle/archive metadata. See [AGENTS.md](AGENTS.md) for the invariants around migrations, `modified_at`, archive inheritance and expansion persistence.
+The current notes schema is version 2 and contains hierarchy, plain-text content, persisted expansion state, lifecycle/archive metadata, local `last_accessed_at` and logical `last_unarchived_at`. Automatic inactive-branch archiving is optional; manual review is launched from Settings → Housekeeping and runs in a dedicated two-pane Tauri window. Candidates are frozen into 20-branch groups for the duration of the review; partial archiving never shuffles new candidates into a reviewed group. New scans are explicit, and the backend still revalidates archive actions transactionally. The default inactivity threshold is 90 days. Legacy creation/modification timestamps remain `NULL` rather than being invented. See [AGENTS.md](AGENTS.md) for the invariants around migrations, `modified_at`, archive inheritance and expansion persistence.
 
 The app-lock password protects UI access only; the SQLite file itself is not encrypted.
 
