@@ -115,6 +115,15 @@ fn preview_inactive_archive() -> Result<housekeeping::ArchivePreview, String> {
 }
 
 #[tauri::command]
+fn preview_inactive_branch_contents(
+    root_id: String,
+    expected_notebook_path: String,
+    expected_days: u64,
+) -> Result<String, String> {
+    storage::preview_inactive_branch_contents(root_id, expected_notebook_path, expected_days)
+}
+
+#[tauri::command]
 fn execute_inactive_archive(previewed_ids: Vec<String>, expected_notebook_path: String, expected_days: u64) -> Result<housekeeping::ArchiveSweepResult, String> {
     storage::execute_inactive_archive(previewed_ids, expected_notebook_path, expected_days)
 }
@@ -514,6 +523,7 @@ fn main() {
             update_settings,
             update_housekeeping_settings,
             preview_inactive_archive,
+            preview_inactive_branch_contents,
             execute_inactive_archive,
             run_scheduled_inactive_archive_if_due,
             list_notebooks,
