@@ -1411,7 +1411,10 @@ function OptionsApp() {
                 Each group can be reviewed and archived independently. Check branches to archive;
                 focus a branch name to inspect its notes. Other groups are never archived by this action.
               </p>
-              <ul className="options-archive-candidate-list">
+              <ul
+                key={currentArchiveBatch.candidates[0]?.id ?? "empty"}
+                className="options-archive-candidate-list"
+              >
                 {currentArchiveBatch.candidates.map((candidate) => (
                   <li
                     key={candidate.id}
