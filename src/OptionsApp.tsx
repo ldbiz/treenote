@@ -29,13 +29,7 @@ import {
   writeFlushRequest,
 } from "./lib/editorFlushBridge";
 import { joinExportPath } from "./lib/exportPath";
-import {
-  ARCHIVE_BATCH_SIZE,
-  archiveBatch,
-  reconcileArchiveSelection,
-  selectedArchiveBatchIds,
-  setArchiveBatchSelection,
-} from "./lib/archiveBatches";
+import { openHousekeepingReviewWindow } from "./lib/openHousekeepingReview";
 import "./styles/theme.css";
 
 const THEME_OPTIONS: {
@@ -60,19 +54,6 @@ type AppSettings = {
   backup_before_restore: boolean;
   housekeeping_auto_archive: boolean;
   housekeeping_archive_after_days: number;
-};
-
-type ArchivePreview = {
-  days: number;
-  notebookPath: string;
-  totalNotes: number;
-  candidates: { id: string; label: string; noteCount: number }[];
-};
-type ArchiveSweepResult = {
-  archivedBranches: number;
-  archivedNotes: number;
-  skippedBranches: number;
-  archivedIds: string[];
 };
 
 type MessageKind = "success" | "error" | "info";
@@ -189,15 +170,6 @@ function OptionsApp() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [managedBackups, setManagedBackups] = useState<ManagedBackupEntryLocal[]>([]);
-  const [archivePreview, setArchivePreview] = useState<ArchivePreview | null>(null);
-  const [selectedArchiveIds, setSelectedArchiveIds] = useState<Set<string>>(() => new Set());
-  const [archivePageIndex, setArchivePageIndex] = useState(0);
-  const [focusedArchiveId, setFocusedArchiveId] = useState<string | null>(null);
-  const [focusedArchiveContents, setFocusedArchiveContents] = useState<{
-    branchId: string;
-    status: "loading" | "ready" | "error";
-    value: string;
-  } | null>(null);
   const [metadataWarning, setMetadataWarning] = useState<string | null>(null);
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
   const [createBackupDialogOpen, setCreateBackupDialogOpen] = useState(false);
@@ -267,10 +239,6 @@ function OptionsApp() {
       invoke<string[]>("list_notebooks"),
     ]);
     setSettings(s);
-    setArchivePreview(null);
-    setSelectedArchiveIds(new Set());
-    setArchivePageIndex(0);
-    setFocusedArchiveId(null);
     setNotebooks(names);
     setHasPassword(sec.password_configured);
     const family = s.editor_font_family || "system";
@@ -674,10 +642,6 @@ function OptionsApp() {
   const persistHousekeeping = async (enabled: boolean, days: number) => {
     if (!settings) return;
     clearSectionMessage("housekeeping");
-    setArchivePreview(null);
-    setSelectedArchiveIds(new Set());
-    setArchivePageIndex(0);
-    setFocusedArchiveId(null);
     try {
       const saved = await invoke<AppSettings>("update_housekeeping_settings", {
         enabled,
@@ -694,141 +658,17 @@ function OptionsApp() {
     }
   };
 
-  const previewInactiveArchive = async () => {
+  const openHousekeepingReview = async () => {
     if (!settings) return;
-    setArchivePreview(null);
-    setSelectedArchiveIds(new Set());
-    setArchivePageIndex(0);
-    setFocusedArchiveId(null);
     clearSectionMessage("housekeeping");
-    await runAction("previewInactiveArchive", async () => {
+    await runAction("openHousekeepingReview", async () => {
       try {
-        const requestId = createFlushRequestId();
-        writeFlushRequest(requestId);
-        await waitForFlushResult(requestId);
-        const preview = await invoke<ArchivePreview>("preview_inactive_archive");
-        setSelectedArchiveIds(new Set(preview.candidates.map((candidate) => candidate.id)));
-        setArchivePageIndex(0);
-        setFocusedArchiveId(preview.candidates[0]?.id ?? null);
-        setArchivePreview(preview);
-        if (preview.candidates.length === 0) {
-          showSectionMessage("housekeeping", "info", "No inactive branches currently qualify.");
-        }
+        await openHousekeepingReviewWindow();
       } catch (error) {
-        showSectionMessage("housekeeping", "error", "Preview failed: " + errorText(error));
+        showSectionMessage("housekeeping", "error", "Unable to open archive review: " + errorText(error));
       }
     });
   };
-
-  const goToArchivePage = (requestedPage: number) => {
-    if (!archivePreview) return;
-    const next = archiveBatch(archivePreview.candidates, requestedPage);
-    setArchivePageIndex(next.pageIndex);
-    setFocusedArchiveId(next.candidates[0]?.id ?? null);
-  };
-
-  const executeInactiveArchive = async () => {
-    if (!archivePreview) return;
-    const currentBatch = archiveBatch(archivePreview.candidates, archivePageIndex);
-    // Never submit selected candidates from a different page. This action
-    // processes just one reviewed group, even though other pages start checked.
-    const ids = selectedArchiveBatchIds(currentBatch.candidates, selectedArchiveIds);
-    if (ids.length === 0) return;
-    clearSectionMessage("housekeeping");
-    await runAction("executeInactiveArchive", async () => {
-      let result: ArchiveSweepResult;
-      try {
-        const requestId = createFlushRequestId();
-        writeFlushRequest(requestId);
-        await waitForFlushResult(requestId);
-        result = await invoke<ArchiveSweepResult>("execute_inactive_archive", {
-          previewedIds: ids,
-          expectedNotebookPath: archivePreview.notebookPath,
-          expectedDays: archivePreview.days,
-        });
-      } catch (error) {
-        showSectionMessage("housekeeping", "error", "Archive failed: " + errorText(error));
-        return;
-      }
-
-      // Tell the main tree about the change before refreshing the preview.
-      localStorage.setItem("treenote-housekeeping-archive-result", JSON.stringify({
-        ...result,
-        at: Date.now(),
-      }));
-      let summary = "Archived " + result.archivedBranches + " branches (" +
-        result.archivedNotes + " notes) from this group." +
-        (result.skippedBranches > 0 ? " Skipped " + result.skippedBranches + " branches no longer eligible." : "");
-
-      try {
-        const refreshed = await invoke<ArchivePreview>("preview_inactive_archive");
-        if (refreshed.notebookPath !== archivePreview.notebookPath ||
-            refreshed.days !== archivePreview.days) {
-          throw new Error("The active notebook or threshold changed.");
-        }
-        const selected = reconcileArchiveSelection(
-          archivePreview.candidates,
-          selectedArchiveIds,
-          refreshed.candidates,
-        );
-        const nextBatch = archiveBatch(refreshed.candidates, currentBatch.pageIndex);
-        setArchivePreview(refreshed);
-        setSelectedArchiveIds(selected);
-        setArchivePageIndex(nextBatch.pageIndex);
-        setFocusedArchiveId(nextBatch.candidates[0]?.id ?? null);
-        summary += refreshed.candidates.length
-          ? " Remaining candidates are ready for the next group."
-          : " No inactive branches remain.";
-      } catch (error) {
-        // Archiving already succeeded; do not report that as a failed archive.
-        setArchivePreview(null);
-        setSelectedArchiveIds(new Set());
-        setArchivePageIndex(0);
-        setFocusedArchiveId(null);
-        summary += " The remaining preview could not be refreshed: " +
-          errorText(error) + ". Run Preview again.";
-      }
-      showSectionMessage("housekeeping", "success", summary);
-      try {
-        await loadNotebookCounts();
-      } catch (error) {
-        console.error("Archive completed but notebook counts could not be refreshed:", error);
-      }
-    });
-  };
-
-  // This preview reads plain text directly from SQLite, without counting
-  // inspection as last_accessed_at activity. Ignore responses from a previous
-  // focus selection or notebook preview to avoid displaying stale content.
-  useEffect(() => {
-    if (!archivePreview || !focusedArchiveId) {
-      setFocusedArchiveContents(null);
-      return;
-    }
-    const branchId = focusedArchiveId;
-    let cancelled = false;
-    setFocusedArchiveContents({ branchId, status: "loading", value: "" });
-    void invoke<string>("preview_inactive_branch_contents", {
-      rootId: branchId,
-      expectedNotebookPath: archivePreview.notebookPath,
-      expectedDays: archivePreview.days,
-    }).then((value) => {
-      if (!cancelled) {
-        setFocusedArchiveContents({ branchId, status: "ready", value });
-      }
-    }).catch((error: unknown) => {
-      if (!cancelled) {
-        setFocusedArchiveContents({
-          branchId,
-          status: "error",
-          value: errorText(error),
-        });
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [archivePreview, focusedArchiveId]);
 
   const backupNow = () => {
     if (!settings) return;
@@ -987,18 +827,6 @@ function OptionsApp() {
       }
     });
   };
-
-  const currentArchiveBatch = archiveBatch(archivePreview?.candidates ?? [], archivePageIndex);
-  const selectedArchiveCandidates = currentArchiveBatch.candidates.filter(
-    (candidate) => selectedArchiveIds.has(candidate.id),
-  );
-  const selectedArchiveNoteCount = selectedArchiveCandidates.reduce(
-    (count, candidate) => count + candidate.noteCount,
-    0,
-  );
-  const focusedArchiveCandidate = currentArchiveBatch.candidates.find(
-    (candidate) => candidate.id === focusedArchiveId,
-  );
 
   const zoomPercent = Math.round(zoom * 100);
   const selectedFontStack = getEditorFontStack(editorFontFamily);
@@ -1335,178 +1163,15 @@ function OptionsApp() {
               type="button"
               className="options-btn options-btn-secondary"
               disabled={isAnyBusy || loading || !settings}
-              onClick={() => void previewInactiveArchive()}
+              onClick={() => void openHousekeepingReview()}
             >
-              {isBusy("previewInactiveArchive") ? "Checking…" : "Preview inactive branches…"}
+              {isBusy("openHousekeepingReview") ? "Opening…" : "Review inactive branches…"}
             </button>
           </div>
-          {archivePreview && archivePreview.candidates.length > 0 && (
-            <div className="options-field" role="region" aria-label="Archive preview">
-              <p className="options-field-label">
-                {archivePreview.candidates.length} qualifying branches
-                {" "}({archivePreview.totalNotes} notes)
-              </p>
-              <div className="options-archive-pagination" role="group" aria-label="Archive review groups">
-                <p className="options-field-hint" aria-live="polite">
-                  Group {currentArchiveBatch.pageIndex + 1} of {currentArchiveBatch.pageCount} ·
-                  {" "}branches {currentArchiveBatch.firstItem}–{currentArchiveBatch.lastItem} of {archivePreview.candidates.length}
-                  {" "}({ARCHIVE_BATCH_SIZE} per group)
-                </p>
-                <div className="options-actions">
-                  <button
-                    type="button"
-                    className="options-btn options-btn-secondary options-btn-compact"
-                    disabled={isAnyBusy || currentArchiveBatch.pageIndex === 0}
-                    onClick={() => goToArchivePage(currentArchiveBatch.pageIndex - 1)}
-                  >
-                    Previous
-                  </button>
-                  <label className="options-archive-page-jump">
-                    <span className="options-field-label">Go to group</span>
-                    <select
-                      className="options-control"
-                      aria-label="Go to archive review group"
-                      value={currentArchiveBatch.pageIndex}
-                      disabled={isAnyBusy}
-                      onChange={(event) => goToArchivePage(Number(event.target.value))}
-                    >
-                      {Array.from({ length: currentArchiveBatch.pageCount }, (_, index) => (
-                        <option key={index} value={index}>{index + 1}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <button
-                    type="button"
-                    className="options-btn options-btn-secondary options-btn-compact"
-                    disabled={isAnyBusy || currentArchiveBatch.pageIndex >= currentArchiveBatch.pageCount - 1}
-                    onClick={() => goToArchivePage(currentArchiveBatch.pageIndex + 1)}
-                  >
-                    Next
-                  </button>
-                </div>
-              </div>
-              <div className="options-actions">
-                <button
-                  type="button"
-                  className="options-btn options-btn-secondary options-btn-compact"
-                  disabled={isAnyBusy || selectedArchiveCandidates.length === currentArchiveBatch.candidates.length}
-                  onClick={() => setSelectedArchiveIds((previous) =>
-                    setArchiveBatchSelection(previous, currentArchiveBatch.candidates, true),
-                  )}
-                >
-                  Select all in group
-                </button>
-                <button
-                  type="button"
-                  className="options-btn options-btn-secondary options-btn-compact"
-                  disabled={isAnyBusy || selectedArchiveCandidates.length === 0}
-                  onClick={() => setSelectedArchiveIds((previous) =>
-                    setArchiveBatchSelection(previous, currentArchiveBatch.candidates, false),
-                  )}
-                >
-                  Select none in group
-                </button>
-              </div>
-              <p className="options-field-hint">
-                Each group can be reviewed and archived independently. Check branches to archive;
-                focus a branch name to inspect its notes. Other groups are never archived by this action.
-              </p>
-              <ul
-                key={currentArchiveBatch.candidates[0]?.id ?? "empty"}
-                className="options-archive-candidate-list"
-              >
-                {currentArchiveBatch.candidates.map((candidate) => (
-                  <li
-                    key={candidate.id}
-                    className={focusedArchiveId === candidate.id
-                      ? "options-archive-candidate options-archive-candidate-focused"
-                      : "options-archive-candidate"}
-                  >
-                    <input
-                      type="checkbox"
-                      className="options-checkbox"
-                      aria-label={"Archive " + candidate.label}
-                      checked={selectedArchiveIds.has(candidate.id)}
-                      disabled={isAnyBusy}
-                      onFocus={() => setFocusedArchiveId(candidate.id)}
-                      onChange={(event) => {
-                        const checked = event.target.checked;
-                        setSelectedArchiveIds((current) => {
-                          const next = new Set(current);
-                          if (checked) next.add(candidate.id);
-                          else next.delete(candidate.id);
-                          return next;
-                        });
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="options-archive-candidate-name"
-                      aria-pressed={focusedArchiveId === candidate.id}
-                      disabled={isAnyBusy}
-                      onFocus={() => setFocusedArchiveId(candidate.id)}
-                      onClick={() => setFocusedArchiveId(candidate.id)}
-                    >
-                      <span>{candidate.label}</span>
-                      <span className="options-archive-candidate-count">
-                        {candidate.noteCount} {candidate.noteCount === 1 ? "note" : "notes"}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              {focusedArchiveCandidate && (
-                <div
-                  className="options-archive-content"
-                  role="region"
-                  aria-label={"Note contents of " + focusedArchiveCandidate.label}
-                >
-                  <p className="options-field-label">
-                    Contents — {focusedArchiveCandidate.label}
-                  </p>
-                  {focusedArchiveContents?.branchId !== focusedArchiveCandidate.id ||
-                   focusedArchiveContents.status === "loading" ? (
-                    <p className="options-field-hint" role="status">Loading note contents…</p>
-                  ) : focusedArchiveContents.status === "error" ? (
-                    <p className="options-field-hint" role="alert">
-                      Couldn&apos;t load the branch contents: {focusedArchiveContents.value}
-                    </p>
-                  ) : (
-                    <pre className="options-archive-content-dump">
-                      {focusedArchiveContents.value}
-                    </pre>
-                  )}
-                </div>
-              )}
-              <p className="options-field-hint" aria-live="polite">
-                Selected in this group: {selectedArchiveCandidates.length} of {currentArchiveBatch.candidates.length} branches ({selectedArchiveNoteCount} notes).
-                Only checked branches in this group will be considered; each is rechecked before archiving.
-              </p>
-              <div className="options-actions">
-                <button
-                  type="button"
-                  className="options-btn options-btn-primary"
-                  disabled={isAnyBusy || selectedArchiveCandidates.length === 0}
-                  onClick={() => void executeInactiveArchive()}
-                >
-                  {isBusy("executeInactiveArchive") ? "Archiving…" : "Archive checked in this group"}
-                </button>
-                <button
-                  type="button"
-                  className="options-btn options-btn-secondary"
-                  disabled={isAnyBusy}
-                  onClick={() => {
-                    setArchivePreview(null);
-                    setSelectedArchiveIds(new Set());
-                    setArchivePageIndex(0);
-                    setFocusedArchiveId(null);
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
+          <p className="options-field-hint">
+            Review opens in a separate, resizable window with a branch list and full text preview.
+            You can process fixed groups of 20 without reshuffling unchecked notes.
+          </p>
         </OptionsSection>
 
         <OptionsSection
