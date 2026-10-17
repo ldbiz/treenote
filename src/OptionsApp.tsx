@@ -184,6 +184,12 @@ function OptionsApp() {
   const [managedBackups, setManagedBackups] = useState<ManagedBackupEntryLocal[]>([]);
   const [archivePreview, setArchivePreview] = useState<ArchivePreview | null>(null);
   const [selectedArchiveIds, setSelectedArchiveIds] = useState<Set<string>>(() => new Set());
+  const [focusedArchiveId, setFocusedArchiveId] = useState<string | null>(null);
+  const [focusedArchiveContents, setFocusedArchiveContents] = useState<{
+    branchId: string;
+    status: "loading" | "ready" | "error";
+    value: string;
+  } | null>(null);
   const [metadataWarning, setMetadataWarning] = useState<string | null>(null);
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
   const [createBackupDialogOpen, setCreateBackupDialogOpen] = useState(false);
@@ -255,6 +261,7 @@ function OptionsApp() {
     setSettings(s);
     setArchivePreview(null);
     setSelectedArchiveIds(new Set());
+    setFocusedArchiveId(null);
     setNotebooks(names);
     setHasPassword(sec.password_configured);
     const family = s.editor_font_family || "system";
@@ -660,6 +667,7 @@ function OptionsApp() {
     clearSectionMessage("housekeeping");
     setArchivePreview(null);
     setSelectedArchiveIds(new Set());
+    setFocusedArchiveId(null);
     try {
       const saved = await invoke<AppSettings>("update_housekeeping_settings", {
         enabled,
@@ -680,6 +688,7 @@ function OptionsApp() {
     if (!settings) return;
     setArchivePreview(null);
     setSelectedArchiveIds(new Set());
+    setFocusedArchiveId(null);
     clearSectionMessage("housekeeping");
     await runAction("previewInactiveArchive", async () => {
       try {
@@ -688,6 +697,7 @@ function OptionsApp() {
         await waitForFlushResult(requestId);
         const preview = await invoke<ArchivePreview>("preview_inactive_archive");
         setSelectedArchiveIds(new Set(preview.candidates.map((candidate) => candidate.id)));
+        setFocusedArchiveId(preview.candidates[0]?.id ?? null);
         setArchivePreview(preview);
         if (preview.candidates.length === 0) {
           showSectionMessage("housekeeping", "info", "No inactive branches currently qualify.");
@@ -717,6 +727,7 @@ function OptionsApp() {
         });
         setArchivePreview(null);
         setSelectedArchiveIds(new Set());
+        setFocusedArchiveId(null);
         localStorage.setItem("treenote-housekeeping-archive-result", JSON.stringify({
           ...result,
           at: Date.now(),
@@ -731,6 +742,39 @@ function OptionsApp() {
       }
     });
   };
+
+  // This preview reads plain text directly from SQLite, without counting
+  // inspection as last_accessed_at activity. Ignore responses from a previous
+  // focus selection or notebook preview to avoid displaying stale content.
+  useEffect(() => {
+    if (!archivePreview || !focusedArchiveId) {
+      setFocusedArchiveContents(null);
+      return;
+    }
+    const branchId = focusedArchiveId;
+    let cancelled = false;
+    setFocusedArchiveContents({ branchId, status: "loading", value: "" });
+    void invoke<string>("preview_inactive_branch_contents", {
+      rootId: branchId,
+      expectedNotebookPath: archivePreview.notebookPath,
+      expectedDays: archivePreview.days,
+    }).then((value) => {
+      if (!cancelled) {
+        setFocusedArchiveContents({ branchId, status: "ready", value });
+      }
+    }).catch((error: unknown) => {
+      if (!cancelled) {
+        setFocusedArchiveContents({
+          branchId,
+          status: "error",
+          value: errorText(error),
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [archivePreview, focusedArchiveId]);
 
   const backupNow = () => {
     if (!settings) return;
@@ -1310,6 +1354,7 @@ function OptionsApp() {
                   onClick={() => {
                     setArchivePreview(null);
                     setSelectedArchiveIds(new Set());
+                    setFocusedArchiveId(null);
                   }}
                 >
                   Cancel
