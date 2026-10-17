@@ -355,6 +355,8 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 parent_id TEXT,
                 label TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                content TEXT,
                 created_at INTEGER,
                 modified_at INTEGER,
                 last_accessed_at INTEGER,
@@ -476,6 +478,63 @@ mod tests {
         conn.execute("UPDATE notes SET modified_at=?1 WHERE id='child'", [NOW]).unwrap();
         let result = execute(&mut conn, 90, NOW, Some(&ids)).unwrap();
         assert_eq!((result.archived_branches, result.skipped_branches), (0, 1));
+    }
+
+    #[test]
+    fn content_preview_includes_root_and_children_in_sibling_order() {
+        let conn = db();
+        put(&conn, "root", None, None, None, None);
+        put(&conn, "second", Some("root"), None, None, None);
+        put(&conn, "first", Some("root"), None, None, None);
+        put(&conn, "grandchild", Some("first"), None, None, None);
+        conn.execute(
+            "UPDATE notes SET label='Parent', content='Root first line\nRoot second line' WHERE id='root'",
+            [],
+        ).unwrap();
+        conn.execute(
+            "UPDATE notes SET label='Second', sort_order=2, content='Last child' WHERE id='second'",
+            [],
+        ).unwrap();
+        conn.execute(
+            "UPDATE notes SET label='First', sort_order=1, content='First child\n\nContinuation' WHERE id='first'",
+            [],
+        ).unwrap();
+        conn.execute(
+            "UPDATE notes SET label='Grandchild', content='A deeper note' WHERE id='grandchild'",
+            [],
+        ).unwrap();
+        let dump = preview_branch_text(&conn, "root").unwrap();
+        assert_eq!(
+            dump,
+            "- Parent\n  Root first line\n  Root second line\n-- First\n   First child\n   \n   Continuation\n--- Grandchild\n    A deeper note\n-- Second\n   Last child",
+        );
+        let dates: (Option<i64>, Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT created_at, modified_at, last_accessed_at FROM notes WHERE id='first'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(dates, (None, None, None));
+    }
+
+    #[test]
+    fn content_preview_displays_independently_archived_children() {
+        let conn = db();
+        put(&conn, "root", None, None, None, None);
+        put(&conn, "already", Some("root"), None, None, None);
+        conn.execute(
+            "UPDATE notes SET archived_at=123, content='Saved content' WHERE id='already'",
+            [],
+        ).unwrap();
+        assert_eq!(
+            preview_branch_text(&conn, "root").unwrap(),
+            "- root\n-- already [already archived]\n   Saved content",
+        );
+    }
+
+    #[test]
+    fn missing_content_preview_branch_is_rejected() {
+        let conn = db();
+        assert!(preview_branch_text(&conn, "missing").unwrap_err().contains("no longer exists"));
     }
 
     #[test]
