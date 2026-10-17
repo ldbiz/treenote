@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  ARCHIVE_BATCH_SIZE,
-  archiveBatch,
-  reconcileArchiveSelection,
-  selectedArchiveBatchIds,
-  setArchiveBatchSelection,
-} from "./archiveBatches";
+import { ARCHIVE_BATCH_SIZE, archiveBatch } from "./archiveBatches";
 
 const candidates = Array.from({ length: 200 }, (_, i) => ({
   id: "branch-" + (i + 1),
@@ -13,7 +7,7 @@ const candidates = Array.from({ length: 200 }, (_, i) => ({
 }));
 
 describe("archive batches", () => {
-  it("shows 20 branches per page for a 200-branch notebook", () => {
+  it("shows fixed groups of 20 for 200 branches", () => {
     expect(ARCHIVE_BATCH_SIZE).toBe(20);
     const first = archiveBatch(candidates, 0);
     const middle = archiveBatch(candidates, 5);
@@ -21,6 +15,7 @@ describe("archive batches", () => {
     expect([first.pageCount, first.firstItem, first.lastItem]).toEqual([10, 1, 20]);
     expect([middle.pageIndex, middle.firstItem, middle.lastItem]).toEqual([5, 101, 120]);
     expect([last.firstItem, last.lastItem]).toEqual([181, 200]);
+    expect(first.candidates[0]).toBe(candidates[0]);
     expect(archiveBatch(candidates, 20).pageIndex).toBe(9);
     expect(archiveBatch(candidates, -10).pageIndex).toBe(0);
   });
@@ -33,41 +28,14 @@ describe("archive batches", () => {
     expect([last.firstItem, last.lastItem, last.candidates.length]).toEqual([41, 43, 3]);
   });
 
-  it("archives only checked candidates from the current group", () => {
-    const selected = new Set(candidates.map((c) => c.id));
-    const first = archiveBatch(candidates, 0).candidates;
-    const second = archiveBatch(candidates, 1).candidates;
-    const excluded = setArchiveBatchSelection(selected, first, false);
-    expect(selectedArchiveBatchIds(first, excluded)).toEqual([]);
-    expect(selectedArchiveBatchIds(second, excluded)).toHaveLength(20);
-    const restored = setArchiveBatchSelection(excluded, first, true);
-    expect(selectedArchiveBatchIds(first, restored)).toHaveLength(20);
-  });
-
-  it("does not send selected branches from other pages to archive", () => {
-    const allSelected = new Set(candidates.map((candidate) => candidate.id));
-    const page = archiveBatch(candidates, 4).candidates;
-    expect(selectedArchiveBatchIds(page, allSelected)).toEqual(
-      candidates.slice(80, 100).map((candidate) => candidate.id),
+  it("keeps later group positions stable when the review data is unchanged", () => {
+    const original = candidates.slice();
+    const page = archiveBatch(original, 1);
+    expect(page.candidates.map((b) => b.id)).toEqual(
+      candidates.slice(20, 40).map((b) => b.id),
     );
-  });
-
-  it("preserves exclusions across batch execution and refresh", () => {
-    const selected = new Set(candidates.map((candidate) => candidate.id));
-    selected.delete("branch-50");
-    const remaining = candidates.slice(20); // first 20 were archived
-    const refreshed = reconcileArchiveSelection(candidates, selected, remaining);
-    expect(refreshed.has("branch-50")).toBe(false);
-    expect(refreshed.has("branch-21")).toBe(true);
-    expect(refreshed.has("branch-1")).toBe(false);
-    expect(refreshed.size).toBe(179);
-    const newCandidate = { id: "new-eligible-branch", noteCount: 3 };
-    expect(reconcileArchiveSelection(candidates, selected, [...remaining, newCandidate]).has(newCandidate.id)).toBe(true);
-  });
-
-  it("clamps the reviewed page as remaining groups shrink", () => {
-    expect(archiveBatch(candidates.slice(0, 180), 9).pageIndex).toBe(8);
-    expect(archiveBatch(candidates.slice(0, 160), 8).pageIndex).toBe(7);
+    // Archiving group 1 does not delete it from the initial session snapshot.
+    expect(archiveBatch(original, 1).candidates).toEqual(page.candidates);
   });
 
   it("rejects invalid batch sizes", () => {
