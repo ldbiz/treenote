@@ -29,6 +29,13 @@ import {
   writeFlushRequest,
 } from "./lib/editorFlushBridge";
 import { joinExportPath } from "./lib/exportPath";
+import {
+  ARCHIVE_BATCH_SIZE,
+  archiveBatch,
+  reconcileArchiveSelection,
+  selectedArchiveBatchIds,
+  setArchiveBatchSelection,
+} from "./lib/archiveBatches";
 import "./styles/theme.css";
 
 const THEME_OPTIONS: {
@@ -184,6 +191,7 @@ function OptionsApp() {
   const [managedBackups, setManagedBackups] = useState<ManagedBackupEntryLocal[]>([]);
   const [archivePreview, setArchivePreview] = useState<ArchivePreview | null>(null);
   const [selectedArchiveIds, setSelectedArchiveIds] = useState<Set<string>>(() => new Set());
+  const [archivePageIndex, setArchivePageIndex] = useState(0);
   const [focusedArchiveId, setFocusedArchiveId] = useState<string | null>(null);
   const [focusedArchiveContents, setFocusedArchiveContents] = useState<{
     branchId: string;
@@ -261,6 +269,7 @@ function OptionsApp() {
     setSettings(s);
     setArchivePreview(null);
     setSelectedArchiveIds(new Set());
+    setArchivePageIndex(0);
     setFocusedArchiveId(null);
     setNotebooks(names);
     setHasPassword(sec.password_configured);
@@ -667,6 +676,7 @@ function OptionsApp() {
     clearSectionMessage("housekeeping");
     setArchivePreview(null);
     setSelectedArchiveIds(new Set());
+    setArchivePageIndex(0);
     setFocusedArchiveId(null);
     try {
       const saved = await invoke<AppSettings>("update_housekeeping_settings", {
@@ -688,6 +698,7 @@ function OptionsApp() {
     if (!settings) return;
     setArchivePreview(null);
     setSelectedArchiveIds(new Set());
+    setArchivePageIndex(0);
     setFocusedArchiveId(null);
     clearSectionMessage("housekeeping");
     await runAction("previewInactiveArchive", async () => {
@@ -697,6 +708,7 @@ function OptionsApp() {
         await waitForFlushResult(requestId);
         const preview = await invoke<ArchivePreview>("preview_inactive_archive");
         setSelectedArchiveIds(new Set(preview.candidates.map((candidate) => candidate.id)));
+        setArchivePageIndex(0);
         setFocusedArchiveId(preview.candidates[0]?.id ?? null);
         setArchivePreview(preview);
         if (preview.candidates.length === 0) {
@@ -708,37 +720,79 @@ function OptionsApp() {
     });
   };
 
+  const goToArchivePage = (requestedPage: number) => {
+    if (!archivePreview) return;
+    const next = archiveBatch(archivePreview.candidates, requestedPage);
+    setArchivePageIndex(next.pageIndex);
+    setFocusedArchiveId(next.candidates[0]?.id ?? null);
+  };
+
   const executeInactiveArchive = async () => {
     if (!archivePreview) return;
-    const ids = archivePreview.candidates
-      .filter((candidate) => selectedArchiveIds.has(candidate.id))
-      .map((candidate) => candidate.id);
+    const currentBatch = archiveBatch(archivePreview.candidates, archivePageIndex);
+    // Never submit selected candidates from a different page. This action
+    // processes just one reviewed group, even though other pages start checked.
+    const ids = selectedArchiveBatchIds(currentBatch.candidates, selectedArchiveIds);
     if (ids.length === 0) return;
     clearSectionMessage("housekeeping");
     await runAction("executeInactiveArchive", async () => {
+      let result: ArchiveSweepResult;
       try {
         const requestId = createFlushRequestId();
         writeFlushRequest(requestId);
         await waitForFlushResult(requestId);
-        const result = await invoke<ArchiveSweepResult>("execute_inactive_archive", {
+        result = await invoke<ArchiveSweepResult>("execute_inactive_archive", {
           previewedIds: ids,
           expectedNotebookPath: archivePreview.notebookPath,
           expectedDays: archivePreview.days,
         });
-        setArchivePreview(null);
-        setSelectedArchiveIds(new Set());
-        setFocusedArchiveId(null);
-        localStorage.setItem("treenote-housekeeping-archive-result", JSON.stringify({
-          ...result,
-          at: Date.now(),
-        }));
-        const summary = "Archived " + result.archivedBranches + " branches (" +
-          result.archivedNotes + " notes)." +
-          (result.skippedBranches > 0 ? " Skipped " + result.skippedBranches + " branches no longer eligible." : "");
-        showSectionMessage("housekeeping", "success", summary);
-        await loadNotebookCounts();
       } catch (error) {
         showSectionMessage("housekeeping", "error", "Archive failed: " + errorText(error));
+        return;
+      }
+
+      // Tell the main tree about the change before refreshing the preview.
+      localStorage.setItem("treenote-housekeeping-archive-result", JSON.stringify({
+        ...result,
+        at: Date.now(),
+      }));
+      let summary = "Archived " + result.archivedBranches + " branches (" +
+        result.archivedNotes + " notes) from this group." +
+        (result.skippedBranches > 0 ? " Skipped " + result.skippedBranches + " branches no longer eligible." : "");
+
+      try {
+        const refreshed = await invoke<ArchivePreview>("preview_inactive_archive");
+        if (refreshed.notebookPath !== archivePreview.notebookPath ||
+            refreshed.days !== archivePreview.days) {
+          throw new Error("The active notebook or threshold changed.");
+        }
+        const selected = reconcileArchiveSelection(
+          archivePreview.candidates,
+          selectedArchiveIds,
+          refreshed.candidates,
+        );
+        const nextBatch = archiveBatch(refreshed.candidates, currentBatch.pageIndex);
+        setArchivePreview(refreshed);
+        setSelectedArchiveIds(selected);
+        setArchivePageIndex(nextBatch.pageIndex);
+        setFocusedArchiveId(nextBatch.candidates[0]?.id ?? null);
+        summary += refreshed.candidates.length
+          ? " Remaining candidates are ready for the next group."
+          : " No inactive branches remain.";
+      } catch (error) {
+        // Archiving already succeeded; do not report that as a failed archive.
+        setArchivePreview(null);
+        setSelectedArchiveIds(new Set());
+        setArchivePageIndex(0);
+        setFocusedArchiveId(null);
+        summary += " The remaining preview could not be refreshed: " +
+          errorText(error) + ". Run Preview again.";
+      }
+      showSectionMessage("housekeeping", "success", summary);
+      try {
+        await loadNotebookCounts();
+      } catch (error) {
+        console.error("Archive completed but notebook counts could not be refreshed:", error);
       }
     });
   };
@@ -934,15 +988,16 @@ function OptionsApp() {
     });
   };
 
-  const focusedArchiveCandidate = archivePreview?.candidates.find(
-    (candidate) => candidate.id === focusedArchiveId,
-  );
-  const selectedArchiveCandidates = archivePreview?.candidates.filter(
+  const currentArchiveBatch = archiveBatch(archivePreview?.candidates ?? [], archivePageIndex);
+  const selectedArchiveCandidates = currentArchiveBatch.candidates.filter(
     (candidate) => selectedArchiveIds.has(candidate.id),
-  ) ?? [];
+  );
   const selectedArchiveNoteCount = selectedArchiveCandidates.reduce(
     (count, candidate) => count + candidate.noteCount,
     0,
+  );
+  const focusedArchiveCandidate = currentArchiveBatch.candidates.find(
+    (candidate) => candidate.id === focusedArchiveId,
   );
 
   const zoomPercent = Math.round(zoom * 100);
