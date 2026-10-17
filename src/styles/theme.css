@@ -783,6 +783,27 @@ body {
   color: var(--text);
 }
 
+.options-archive-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 0;
+}
+
+.options-archive-page-jump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.options-archive-page-jump .options-control {
+  width: 58px;
+  min-height: 30px;
+  padding: 3px 6px;
+}
+
 .options-archive-candidate-list {
   max-height: 230px;
   overflow-y: auto;
