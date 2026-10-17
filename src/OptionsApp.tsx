@@ -183,6 +183,7 @@ function OptionsApp() {
   const [loading, setLoading] = useState(true);
   const [managedBackups, setManagedBackups] = useState<ManagedBackupEntryLocal[]>([]);
   const [archivePreview, setArchivePreview] = useState<ArchivePreview | null>(null);
+  const [selectedArchiveIds, setSelectedArchiveIds] = useState<Set<string>>(() => new Set());
   const [metadataWarning, setMetadataWarning] = useState<string | null>(null);
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
   const [createBackupDialogOpen, setCreateBackupDialogOpen] = useState(false);
@@ -253,6 +254,7 @@ function OptionsApp() {
     ]);
     setSettings(s);
     setArchivePreview(null);
+    setSelectedArchiveIds(new Set());
     setNotebooks(names);
     setHasPassword(sec.password_configured);
     const family = s.editor_font_family || "system";
@@ -657,6 +659,7 @@ function OptionsApp() {
     if (!settings) return;
     clearSectionMessage("housekeeping");
     setArchivePreview(null);
+    setSelectedArchiveIds(new Set());
     try {
       const saved = await invoke<AppSettings>("update_housekeeping_settings", {
         enabled,
@@ -676,6 +679,7 @@ function OptionsApp() {
   const previewInactiveArchive = async () => {
     if (!settings) return;
     setArchivePreview(null);
+    setSelectedArchiveIds(new Set());
     clearSectionMessage("housekeeping");
     await runAction("previewInactiveArchive", async () => {
       try {
@@ -683,6 +687,7 @@ function OptionsApp() {
         writeFlushRequest(requestId);
         await waitForFlushResult(requestId);
         const preview = await invoke<ArchivePreview>("preview_inactive_archive");
+        setSelectedArchiveIds(new Set(preview.candidates.map((candidate) => candidate.id)));
         setArchivePreview(preview);
         if (preview.candidates.length === 0) {
           showSectionMessage("housekeeping", "info", "No inactive branches currently qualify.");
@@ -695,7 +700,10 @@ function OptionsApp() {
 
   const executeInactiveArchive = async () => {
     if (!archivePreview) return;
-    const ids = archivePreview.candidates.map((candidate) => candidate.id);
+    const ids = archivePreview.candidates
+      .filter((candidate) => selectedArchiveIds.has(candidate.id))
+      .map((candidate) => candidate.id);
+    if (ids.length === 0) return;
     clearSectionMessage("housekeeping");
     await runAction("executeInactiveArchive", async () => {
       try {
@@ -708,6 +716,7 @@ function OptionsApp() {
           expectedDays: archivePreview.days,
         });
         setArchivePreview(null);
+        setSelectedArchiveIds(new Set());
         localStorage.setItem("treenote-housekeeping-archive-result", JSON.stringify({
           ...result,
           at: Date.now(),
@@ -880,6 +889,14 @@ function OptionsApp() {
       }
     });
   };
+
+  const selectedArchiveCandidates = archivePreview?.candidates.filter(
+    (candidate) => selectedArchiveIds.has(candidate.id),
+  ) ?? [];
+  const selectedArchiveNoteCount = selectedArchiveCandidates.reduce(
+    (count, candidate) => count + candidate.noteCount,
+    0,
+  );
 
   const zoomPercent = Math.round(zoom * 100);
   const selectedFontStack = getEditorFontStack(editorFontFamily);
@@ -1209,6 +1226,7 @@ function OptionsApp() {
           <p className="options-field-hint">
             Reading or editing a note counts as activity. Legacy notes with unknown dates
             are eligible. Manually unarchived branches are protected for a full threshold period.
+            To archive or unarchive an individual note or branch, right-click it in the tree.
           </p>
           <div className="options-actions">
             <button
@@ -1226,30 +1244,73 @@ function OptionsApp() {
                 {archivePreview.candidates.length} qualifying branches
                 {" "}({archivePreview.totalNotes} notes)
               </p>
-              <ul style={{ maxHeight: 240, overflowY: "auto", marginBlock: 8, paddingLeft: 25 }}>
+              <div className="options-actions">
+                <button
+                  type="button"
+                  className="options-btn options-btn-secondary options-btn-compact"
+                  disabled={isAnyBusy || selectedArchiveIds.size === archivePreview.candidates.length}
+                  onClick={() => setSelectedArchiveIds(
+                    new Set(archivePreview.candidates.map((candidate) => candidate.id)),
+                  )}
+                >
+                  Select all
+                </button>
+                <button
+                  type="button"
+                  className="options-btn options-btn-secondary options-btn-compact"
+                  disabled={isAnyBusy || selectedArchiveIds.size === 0}
+                  onClick={() => setSelectedArchiveIds(new Set())}
+                >
+                  Select none
+                </button>
+              </div>
+              <ul style={{ maxHeight: 240, overflowY: "auto", marginBlock: 8, paddingLeft: 0, listStyle: "none" }}>
                 {archivePreview.candidates.map((candidate) => (
                   <li key={candidate.id}>
-                    {candidate.label} — {candidate.noteCount} {candidate.noteCount === 1 ? "note" : "notes"}
+                    <label className="options-field options-checkbox-field">
+                      <input
+                        type="checkbox"
+                        className="options-checkbox"
+                        checked={selectedArchiveIds.has(candidate.id)}
+                        disabled={isAnyBusy}
+                        onChange={(event) => {
+                          const checked = event.target.checked;
+                          setSelectedArchiveIds((current) => {
+                            const next = new Set(current);
+                            if (checked) next.add(candidate.id);
+                            else next.delete(candidate.id);
+                            return next;
+                          });
+                        }}
+                      />
+                      <span className="options-checkbox-label">
+                        {candidate.label} — {candidate.noteCount} {candidate.noteCount === 1 ? "note" : "notes"}
+                      </span>
+                    </label>
                   </li>
                 ))}
               </ul>
-              <p className="options-field-hint">
-                Only these branches will be considered. Each is rechecked before archiving.
+              <p className="options-field-hint" aria-live="polite">
+                Selected: {selectedArchiveCandidates.length} branches ({selectedArchiveNoteCount} notes).
+                Only selected branches will be considered; each is rechecked before archiving.
               </p>
               <div className="options-actions">
                 <button
                   type="button"
                   className="options-btn options-btn-primary"
-                  disabled={isAnyBusy}
+                  disabled={isAnyBusy || selectedArchiveCandidates.length === 0}
                   onClick={() => void executeInactiveArchive()}
                 >
-                  {isBusy("executeInactiveArchive") ? "Archiving…" : "Archive these branches"}
+                  {isBusy("executeInactiveArchive") ? "Archiving…" : "Archive selected branches"}
                 </button>
                 <button
                   type="button"
                   className="options-btn options-btn-secondary"
                   disabled={isAnyBusy}
-                  onClick={() => setArchivePreview(null)}
+                  onClick={() => {
+                    setArchivePreview(null);
+                    setSelectedArchiveIds(new Set());
+                  }}
                 >
                   Cancel
                 </button>
