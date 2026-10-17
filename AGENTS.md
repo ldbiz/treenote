@@ -102,7 +102,8 @@ Keep explicit archive state in storage and derived/effective archive state in th
 - Only archive entire inactive branches. Recently active descendants veto their ancestor's eligibility, but an inactive child branch under an active parent can qualify separately.
 - Record an explicit archive marker on the highest eligible root only. Descendant timestamp and archive markers must not be rewritten; already effectively archived descendants are skipped.
 - A recent explicit `last_unarchived_at` protects that note and its descendants for the configured inactivity period, including independently eligible child branches.
-- Preview and execution use the same backend selector. Manual confirmation includes only previously previewed root IDs; execution revalidates them within a transaction.
+- Preview and execution use the same backend selector. The manual preview selects every candidate by default; users can deselect individual branches, Select all, or Select none. Disable execution when none are selected. Only the selected, previously previewed root IDs may be archived; execution revalidates them within a transaction.
+- The existing tree context menu also supports explicit Archive/Archive branch/Unarchive for individual notes and branches, independently of the inactivity threshold.
 - Scheduling preferences and last-run bookkeeping reside in install-local settings, keyed per notebook. They are not part of logical notebook state and should not trigger future sync.
 - TreeNote JSON preserves `last_unarchived_at` (logical lifecycle state) but does not export `last_accessed_at` (local activity state). Physical SQLite backups naturally preserve both.
 - This tranche does **not** implement automatic deletion or merging. The next issue #25 slice may delete empty childless notes retaining the default timestamp title, with preview and safety checks.
