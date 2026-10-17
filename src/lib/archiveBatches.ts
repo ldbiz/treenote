@@ -1,7 +1,5 @@
-/** Small, deterministic batches for reviewing manual archive candidates. */
+/** Deterministic, fixed-size groups for a single archive-review session. */
 export const ARCHIVE_BATCH_SIZE = 20;
-
-export type ArchiveCandidateId = { id: string };
 
 export function archiveBatch<T>(
   candidates: readonly T[],
@@ -29,43 +27,4 @@ export function archiveBatch<T>(
     lastItem: end,
     candidates: candidates.slice(offset, end),
   };
-}
-
-/** Only selected IDs on the visible page are submitted for execution. */
-export function selectedArchiveBatchIds<T extends ArchiveCandidateId>(
-  batchCandidates: readonly T[],
-  selected: ReadonlySet<string>,
-): string[] {
-  return batchCandidates
-    .filter((candidate) => selected.has(candidate.id))
-    .map((candidate) => candidate.id);
-}
-
-/** Select all/none only affects candidates in the visible batch. */
-export function setArchiveBatchSelection<T extends ArchiveCandidateId>(
-  selected: ReadonlySet<string>,
-  batchCandidates: readonly T[],
-  shouldSelect: boolean,
-): Set<string> {
-  const next = new Set(selected);
-  for (const candidate of batchCandidates) {
-    if (shouldSelect) next.add(candidate.id);
-    else next.delete(candidate.id);
-  }
-  return next;
-}
-
-/** After archiving one batch, keep other pages' deliberate exclusions.
- *  Any genuinely new candidate starts selected by default. */
-export function reconcileArchiveSelection<T extends ArchiveCandidateId>(
-  previousCandidates: readonly T[],
-  previousSelection: ReadonlySet<string>,
-  refreshedCandidates: readonly T[],
-): Set<string> {
-  const previousIds = new Set(previousCandidates.map((candidate) => candidate.id));
-  return new Set(
-    refreshedCandidates
-      .filter((candidate) => !previousIds.has(candidate.id) || previousSelection.has(candidate.id))
-      .map((candidate) => candidate.id),
-  );
 }
