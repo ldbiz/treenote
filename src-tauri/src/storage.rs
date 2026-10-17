@@ -867,10 +867,8 @@ pub fn preview_inactive_branch_contents(
         return Err("The notebook or archive threshold changed. Preview again before archiving.".into());
     }
     let conn = db_connection()?;
-    let current = housekeeping::preview(&conn, expected_days, now_millis())?;
-    if !current.candidates.iter().any(|candidate| candidate.id == root_id) {
-        return Err("This branch has changed or no longer qualifies. Refresh the housekeeping preview.".into());
-    }
+    // Inspect the specified branch without a notebook-wide eligibility scan.
+    // Executing an archive still revalidates the selected roots transactionally.
     housekeeping::preview_branch_text(&conn, &root_id)
 }
 
