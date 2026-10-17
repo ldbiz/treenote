@@ -1346,31 +1346,73 @@ function OptionsApp() {
                 {archivePreview.candidates.length} qualifying branches
                 {" "}({archivePreview.totalNotes} notes)
               </p>
+              <div className="options-archive-pagination" role="group" aria-label="Archive review groups">
+                <p className="options-field-hint" aria-live="polite">
+                  Group {currentArchiveBatch.pageIndex + 1} of {currentArchiveBatch.pageCount} ·
+                  {" "}branches {currentArchiveBatch.firstItem}–{currentArchiveBatch.lastItem} of {archivePreview.candidates.length}
+                  {" "}({ARCHIVE_BATCH_SIZE} per group)
+                </p>
+                <div className="options-actions">
+                  <button
+                    type="button"
+                    className="options-btn options-btn-secondary options-btn-compact"
+                    disabled={isAnyBusy || currentArchiveBatch.pageIndex === 0}
+                    onClick={() => goToArchivePage(currentArchiveBatch.pageIndex - 1)}
+                  >
+                    Previous
+                  </button>
+                  <label className="options-archive-page-jump">
+                    <span className="options-field-label">Go to group</span>
+                    <select
+                      className="options-control"
+                      aria-label="Go to archive review group"
+                      value={currentArchiveBatch.pageIndex}
+                      disabled={isAnyBusy}
+                      onChange={(event) => goToArchivePage(Number(event.target.value))}
+                    >
+                      {Array.from({ length: currentArchiveBatch.pageCount }, (_, index) => (
+                        <option key={index} value={index}>{index + 1}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="options-btn options-btn-secondary options-btn-compact"
+                    disabled={isAnyBusy || currentArchiveBatch.pageIndex >= currentArchiveBatch.pageCount - 1}
+                    onClick={() => goToArchivePage(currentArchiveBatch.pageIndex + 1)}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
               <div className="options-actions">
                 <button
                   type="button"
                   className="options-btn options-btn-secondary options-btn-compact"
-                  disabled={isAnyBusy || selectedArchiveIds.size === archivePreview.candidates.length}
-                  onClick={() => setSelectedArchiveIds(
-                    new Set(archivePreview.candidates.map((candidate) => candidate.id)),
+                  disabled={isAnyBusy || selectedArchiveCandidates.length === currentArchiveBatch.candidates.length}
+                  onClick={() => setSelectedArchiveIds((previous) =>
+                    setArchiveBatchSelection(previous, currentArchiveBatch.candidates, true),
                   )}
                 >
-                  Select all
+                  Select all in group
                 </button>
                 <button
                   type="button"
                   className="options-btn options-btn-secondary options-btn-compact"
-                  disabled={isAnyBusy || selectedArchiveIds.size === 0}
-                  onClick={() => setSelectedArchiveIds(new Set())}
+                  disabled={isAnyBusy || selectedArchiveCandidates.length === 0}
+                  onClick={() => setSelectedArchiveIds((previous) =>
+                    setArchiveBatchSelection(previous, currentArchiveBatch.candidates, false),
+                  )}
                 >
-                  Select none
+                  Select none in group
                 </button>
               </div>
               <p className="options-field-hint">
-                Check branches to archive. Focus a branch name to inspect its notes.
+                Each group can be reviewed and archived independently. Check branches to archive;
+                focus a branch name to inspect its notes. Other groups are never archived by this action.
               </p>
               <ul className="options-archive-candidate-list">
-                {archivePreview.candidates.map((candidate) => (
+                {currentArchiveBatch.candidates.map((candidate) => (
                   <li
                     key={candidate.id}
                     className={focusedArchiveId === candidate.id
@@ -1434,8 +1476,8 @@ function OptionsApp() {
                 </div>
               )}
               <p className="options-field-hint" aria-live="polite">
-                Selected: {selectedArchiveCandidates.length} branches ({selectedArchiveNoteCount} notes).
-                Only selected branches will be considered; each is rechecked before archiving.
+                Selected in this group: {selectedArchiveCandidates.length} of {currentArchiveBatch.candidates.length} branches ({selectedArchiveNoteCount} notes).
+                Only checked branches in this group will be considered; each is rechecked before archiving.
               </p>
               <div className="options-actions">
                 <button
@@ -1444,7 +1486,7 @@ function OptionsApp() {
                   disabled={isAnyBusy || selectedArchiveCandidates.length === 0}
                   onClick={() => void executeInactiveArchive()}
                 >
-                  {isBusy("executeInactiveArchive") ? "Archiving…" : "Archive selected branches"}
+                  {isBusy("executeInactiveArchive") ? "Archiving…" : "Archive checked in this group"}
                 </button>
                 <button
                   type="button"
@@ -1453,6 +1495,7 @@ function OptionsApp() {
                   onClick={() => {
                     setArchivePreview(null);
                     setSelectedArchiveIds(new Set());
+                    setArchivePageIndex(0);
                     setFocusedArchiveId(null);
                   }}
                 >
