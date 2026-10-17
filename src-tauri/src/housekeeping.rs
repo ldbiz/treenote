@@ -204,6 +204,95 @@ pub fn preview(conn: &Connection, days: u64, now: i64) -> Result<ArchivePreview,
     })
 }
 
+/// Return an unmodified, read-only text dump for a branch in the archive
+/// preview. A note's title is prefixed with one hyphen per level, and every
+/// line of its plain-text content is printed beneath it. This function never
+/// records an access, since inspecting a housekeeping candidate should not
+/// make it ineligible for archiving.
+pub fn preview_branch_text(conn: &Connection, root_id: &str) -> Result<String, String> {
+    struct PreviewNote {
+        id: String,
+        parent_id: Option<String>,
+        label: String,
+        content: String,
+        sort_order: i64,
+        archived_at: Option<i64>,
+    }
+
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE descendants(id) AS (
+            SELECT id FROM notes WHERE id=?1
+            UNION
+            SELECT n.id FROM notes n JOIN descendants d ON n.parent_id=d.id
+        )
+        SELECT id, parent_id, label, COALESCE(content,''), sort_order, archived_at
+        FROM notes WHERE id IN (SELECT id FROM descendants)",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![root_id], |r| {
+        Ok(PreviewNote {
+            id: r.get(0)?,
+            parent_id: r.get(1)?,
+            label: r.get(2)?,
+            content: r.get(3)?,
+            sort_order: r.get(4)?,
+            archived_at: r.get(5)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    let notes = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let by_id: HashMap<&str, usize> = notes.iter().enumerate()
+        .map(|(i, note)| (note.id.as_str(), i))
+        .collect();
+    let root_index = *by_id.get(root_id)
+        .ok_or_else(|| "The previewed branch no longer exists.".to_string())?;
+
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, note) in notes.iter().enumerate() {
+        if i == root_index {
+            continue;
+        }
+        if let Some(parent) = note.parent_id.as_deref() {
+            children.entry(parent).or_default().push(i);
+        }
+    }
+    for sibling_ids in children.values_mut() {
+        sibling_ids.sort_by(|a, b| notes[*a].sort_order
+            .cmp(&notes[*b].sort_order)
+            .then_with(|| notes[*a].id.cmp(&notes[*b].id)));
+    }
+
+    let mut dump = String::new();
+    let mut visited = HashSet::new();
+    let mut stack = vec![(root_index, 0_usize)];
+    while let Some((i, level)) = stack.pop() {
+        if !visited.insert(i) {
+            return Err("Invalid notebook hierarchy: cycle detected.".into());
+        }
+        let note = &notes[i];
+        dump.push_str(&"-".repeat(level + 1));
+        dump.push(' ');
+        dump.push_str(&note.label);
+        if note.archived_at.is_some() {
+            dump.push_str(" [already archived]");
+        }
+        dump.push('\n');
+        if !note.content.is_empty() {
+            for line in note.content.lines() {
+                dump.push_str(&" ".repeat(level + 2));
+                dump.push_str(line);
+                dump.push('\n');
+            }
+        }
+
+        if let Some(child_ids) = children.get(note.id.as_str()) {
+            for &child in child_ids.iter().rev() {
+                stack.push((child, level + 1));
+            }
+        }
+    }
+    Ok(dump.trim_end_matches('\n').to_string())
+}
+
 /// Re-evaluate candidates inside the write transaction. A manual run can only
 /// archive IDs shown in its preview; freshly eligible branches cannot slip in.
 pub fn execute(
