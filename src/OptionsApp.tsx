@@ -934,6 +934,9 @@ function OptionsApp() {
     });
   };
 
+  const focusedArchiveCandidate = archivePreview?.candidates.find(
+    (candidate) => candidate.id === focusedArchiveId,
+  );
   const selectedArchiveCandidates = archivePreview?.candidates.filter(
     (candidate) => selectedArchiveIds.has(candidate.id),
   ) ?? [];
@@ -1308,32 +1311,73 @@ function OptionsApp() {
                   Select none
                 </button>
               </div>
-              <ul style={{ maxHeight: 240, overflowY: "auto", marginBlock: 8, paddingLeft: 0, listStyle: "none" }}>
+              <p className="options-field-hint">
+                Check branches to archive. Focus a branch name to inspect its notes.
+              </p>
+              <ul className="options-archive-candidate-list">
                 {archivePreview.candidates.map((candidate) => (
-                  <li key={candidate.id}>
-                    <label className="options-field options-checkbox-field">
-                      <input
-                        type="checkbox"
-                        className="options-checkbox"
-                        checked={selectedArchiveIds.has(candidate.id)}
-                        disabled={isAnyBusy}
-                        onChange={(event) => {
-                          const checked = event.target.checked;
-                          setSelectedArchiveIds((current) => {
-                            const next = new Set(current);
-                            if (checked) next.add(candidate.id);
-                            else next.delete(candidate.id);
-                            return next;
-                          });
-                        }}
-                      />
-                      <span className="options-checkbox-label">
-                        {candidate.label} — {candidate.noteCount} {candidate.noteCount === 1 ? "note" : "notes"}
+                  <li
+                    key={candidate.id}
+                    className={focusedArchiveId === candidate.id
+                      ? "options-archive-candidate options-archive-candidate-focused"
+                      : "options-archive-candidate"}
+                  >
+                    <input
+                      type="checkbox"
+                      className="options-checkbox"
+                      aria-label={"Archive " + candidate.label}
+                      checked={selectedArchiveIds.has(candidate.id)}
+                      disabled={isAnyBusy}
+                      onFocus={() => setFocusedArchiveId(candidate.id)}
+                      onChange={(event) => {
+                        const checked = event.target.checked;
+                        setSelectedArchiveIds((current) => {
+                          const next = new Set(current);
+                          if (checked) next.add(candidate.id);
+                          else next.delete(candidate.id);
+                          return next;
+                        });
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="options-archive-candidate-name"
+                      aria-pressed={focusedArchiveId === candidate.id}
+                      disabled={isAnyBusy}
+                      onFocus={() => setFocusedArchiveId(candidate.id)}
+                      onClick={() => setFocusedArchiveId(candidate.id)}
+                    >
+                      <span>{candidate.label}</span>
+                      <span className="options-archive-candidate-count">
+                        {candidate.noteCount} {candidate.noteCount === 1 ? "note" : "notes"}
                       </span>
-                    </label>
+                    </button>
                   </li>
                 ))}
               </ul>
+              {focusedArchiveCandidate && (
+                <div
+                  className="options-archive-content"
+                  role="region"
+                  aria-label={"Note contents of " + focusedArchiveCandidate.label}
+                >
+                  <p className="options-field-label">
+                    Contents — {focusedArchiveCandidate.label}
+                  </p>
+                  {focusedArchiveContents?.branchId !== focusedArchiveCandidate.id ||
+                   focusedArchiveContents.status === "loading" ? (
+                    <p className="options-field-hint" role="status">Loading note contents…</p>
+                  ) : focusedArchiveContents.status === "error" ? (
+                    <p className="options-field-hint" role="alert">
+                      Couldn&apos;t load the branch contents: {focusedArchiveContents.value}
+                    </p>
+                  ) : (
+                    <pre className="options-archive-content-dump">
+                      {focusedArchiveContents.value}
+                    </pre>
+                  )}
+                </div>
+              )}
               <p className="options-field-hint" aria-live="polite">
                 Selected: {selectedArchiveCandidates.length} branches ({selectedArchiveNoteCount} notes).
                 Only selected branches will be considered; each is rechecked before archiving.
