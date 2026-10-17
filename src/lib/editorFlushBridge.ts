@@ -1,4 +1,4 @@
-/** Cross-window flush request/result bridge (main ↔ options). */
+/** Cross-window editor-flush bridge (main ↔ settings and housekeeping reviewer). */
 
 export const FLUSH_REQUEST_KEY = "treenote-flush-request";
 export const FLUSH_RESULT_KEY = "treenote-flush-result";
