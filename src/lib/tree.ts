@@ -46,10 +46,11 @@ export function invokeErrorMessage(error: unknown): string {
 
 export async function addNode(
   parentId: string | null,
-  label: string
+  label: string,
+  generatedTitle = false,
 ): Promise<TreeNodeData | null> {
   try {
-    const node = await invoke<TreeNodeData>("add_node", { parentId, label });
+    const node = await invoke<TreeNodeData>("add_node", { parentId, label, generatedTitle });
     return node;
   } catch (error) {
     console.error("Failed to add node:", error);

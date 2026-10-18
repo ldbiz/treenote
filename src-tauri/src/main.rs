@@ -5,6 +5,7 @@ mod atomic_file;
 mod autostart;
 mod backup;
 mod backup_meta;
+mod cleanup;
 mod convert;
 mod data_root;
 mod dev_mode;
@@ -60,8 +61,8 @@ fn get_tree() -> Result<Vec<TreeNode>, String> {
 }
 
 #[tauri::command]
-fn add_node(parent_id: Option<String>, label: String) -> Result<TreeNode, String> {
-    storage::add_node(parent_id, label)
+fn add_node(parent_id: Option<String>, label: String, generated_title: Option<bool>) -> Result<TreeNode, String> {
+    storage::add_node(parent_id, label, generated_title)
 }
 
 #[tauri::command]
@@ -126,6 +127,20 @@ fn preview_inactive_branch_contents(
 #[tauri::command]
 fn execute_inactive_archive(previewed_ids: Vec<String>, expected_notebook_path: String, expected_days: u64) -> Result<housekeeping::ArchiveSweepResult, String> {
     storage::execute_inactive_archive(previewed_ids, expected_notebook_path, expected_days)
+}
+
+#[tauri::command]
+fn preview_empty_note_cleanup() -> Result<cleanup::EmptyCleanupPreview, String> {
+    storage::preview_empty_note_cleanup()
+}
+
+#[tauri::command]
+fn execute_empty_note_cleanup(
+    previewed_ids: Vec<String>,
+    expected_notebook_path: String,
+    expected_days: u64,
+) -> Result<cleanup::EmptyCleanupResult, String> {
+    storage::execute_empty_note_cleanup(previewed_ids, expected_notebook_path, expected_days)
 }
 
 #[tauri::command]
@@ -513,6 +528,8 @@ fn main() {
             update_node,
             set_node_expanded,
             delete_node,
+            preview_empty_note_cleanup,
+            execute_empty_note_cleanup,
             set_node_archived,
             move_node,
             get_node_content,

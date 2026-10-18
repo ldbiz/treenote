@@ -26,6 +26,7 @@ use crate::backup_meta::{
 use crate::atomic_file;
 use crate::data_root::{self, DEFAULT_NOTEBOOK_FILENAME};
 use crate::housekeeping::{self, ArchivePreview, ArchiveSweepResult};
+use crate::cleanup::{self, EmptyCleanupPreview, EmptyCleanupResult};
 use crate::managed_notebook;
 use crate::notebook_lock::{self, NotebookLock};
 use crate::tree::TreeNode;
@@ -42,7 +43,8 @@ CREATE TABLE IF NOT EXISTS notes (
     modified_at INTEGER,
     archived_at INTEGER,
     last_accessed_at INTEGER,
-    last_unarchived_at INTEGER
+    last_unarchived_at INTEGER,
+    generated_title_untouched INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS notes_parent_id_idx ON notes(parent_id);";
 
@@ -67,8 +69,9 @@ const CURRENT_NOTES_COLUMNS: &[&str] = &[
     "archived_at",
     "last_accessed_at",
     "last_unarchived_at",
+    "generated_title_untouched",
 ];
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 const RESTORE_ATTACH_ALIAS: &str = "restore_src";
 
@@ -239,6 +242,7 @@ pub(crate) fn ensure_db_schema(conn: &Connection) -> rusqlite::Result<()> {
         ("archived_at", "ALTER TABLE notes ADD COLUMN archived_at INTEGER"),
         ("last_accessed_at", "ALTER TABLE notes ADD COLUMN last_accessed_at INTEGER"),
         ("last_unarchived_at", "ALTER TABLE notes ADD COLUMN last_unarchived_at INTEGER"),
+        ("generated_title_untouched", "ALTER TABLE notes ADD COLUMN generated_title_untouched INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute_batch(sql)?;
@@ -887,6 +891,43 @@ pub fn execute_inactive_archive(
     housekeeping::execute(&mut conn, s.housekeeping_archive_after_days, now_millis(), Some(&previewed_ids))
 }
 
+/// Manual-only empty-note cleanup. Preview never records a note access.
+pub fn preview_empty_note_cleanup() -> Result<EmptyCleanupPreview, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    let conn = db_connection()?;
+    let mut preview = cleanup::preview(&conn, s.housekeeping_archive_after_days, now_millis())?;
+    preview.notebook_path = s.database_path.clone();
+    Ok(preview)
+}
+
+/// Create and lock a managed, verified SQLite safety snapshot before touching
+/// a single note. The settings lock prevents notebook switches during backup
+/// and deletion; the DB transaction revalidates everything against new edits.
+pub fn execute_empty_note_cleanup(
+    previewed_ids: Vec<String>,
+    expected_notebook_path: String,
+    expected_days: u64,
+) -> Result<EmptyCleanupResult, String> {
+    if previewed_ids.is_empty() {
+        return Err("Select at least one note to delete.".into());
+    }
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    if s.database_path != expected_notebook_path || s.housekeeping_archive_after_days != expected_days {
+        return Err("The notebook or inactivity threshold changed. Start a new scan.".into());
+    }
+    let (notebook_dir, timestamp) = create_managed_backup_without_prune(&s, None)?;
+    let (backup, _) = finalize_backup_prune_and_metadata(
+        &notebook_dir, timestamp, Some("Before empty-note cleanup".into()), true,
+    )?;
+    if !backup.metadata_saved || !Path::new(&backup.path).is_file() {
+        return Err("The safety backup could not be retained and locked. No notes were deleted.".into());
+    }
+    let mut conn = db_connection()?;
+    let mut result = cleanup::execute(&mut conn, expected_days, now_millis(), &previewed_ids)?;
+    result.backup_path = backup.path;
+    Ok(result)
+}
+
 fn housekeeping_due(s: &AppSettings, now: i64) -> bool {
     s.housekeeping_auto_archive
         && !s.housekeeping_last_run_by_notebook
@@ -1427,6 +1468,9 @@ fn restore_notes_from_backup(
         .map(|column| {
             if legacy_expansion && *column == "is_expanded" {
                 "0 AS is_expanded".to_string()
+            } else if *column == "generated_title_untouched" &&
+                !backup_columns.iter().any(|candidate| candidate == column) {
+                "0 AS generated_title_untouched".to_string()
             } else if backup_columns.iter().any(|candidate| candidate == column) {
                 (*column).to_string()
             } else {
@@ -1680,16 +1724,24 @@ fn would_exceed_max_level(
     Ok(resulting > current_max)
 }
 
-pub fn add_node(parent_id: Option<String>, label: String) -> Result<TreeNode, String> {
+pub fn add_node(parent_id: Option<String>, label: String, generated_title: Option<bool>) -> Result<TreeNode, String> {
     let mut conn = db_connection()?;
-    add_node_in_conn(&mut conn, parent_id, label)
+    add_node_with_provenance_in_conn(&mut conn, parent_id, label, generated_title.unwrap_or(false))
 }
 
-fn add_node_in_conn(
+// Existing programmatic/test creation paths deliberately do not claim UI provenance.
+#[cfg(test)]
+fn add_node_in_conn(conn: &mut Connection, parent_id: Option<String>, label: String) -> Result<TreeNode, String> {
+    add_node_with_provenance_in_conn(conn, parent_id, label, false)
+}
+
+fn add_node_with_provenance_in_conn(
     conn: &mut Connection,
     parent_id: Option<String>,
     label: String,
+    generated_title: bool,
 ) -> Result<TreeNode, String> {
+    let generated = generated_title && cleanup::is_timestamp_title(&label);
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     if let Some(ref parent) = parent_id {
         let parent_level = note_level(&tx, parent)?;
@@ -1705,8 +1757,8 @@ fn add_node_in_conn(
     )
     .map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT INTO notes (id,parent_id,label,is_expanded,sort_order,content,created_at,modified_at,archived_at) VALUES (?1,?2,?3,1,0,'',?4,?4,NULL)",
-        params![id, parent_id, label, now],
+        "INSERT INTO notes (id,parent_id,label,is_expanded,sort_order,content,created_at,modified_at,archived_at,generated_title_untouched) VALUES (?1,?2,?3,1,0,'',?4,?4,NULL,?5)",
+        params![id, parent_id, label, now, if generated { 1 } else { 0 }],
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -1736,7 +1788,7 @@ fn note_exists(conn: &Connection, id: &str) -> Result<bool, String> {
 fn update_node_in_conn(conn: &Connection, id: &str, new_label: &str) -> Result<(), String> {
     let changed = conn
         .execute(
-            "UPDATE notes SET label=?1, modified_at=?2 WHERE id=?3 AND label<>?1",
+            "UPDATE notes SET label=?1, modified_at=?2, generated_title_untouched=0 WHERE id=?3 AND label<>?1",
             params![new_label, now_millis(), id],
         )
         .map_err(|e| e.to_string())?;
@@ -1998,7 +2050,7 @@ pub fn get_node(id: String) -> Result<TreeNode, String> {
 fn update_node_content_in_conn(conn: &Connection, id: &str, content: &str) -> Result<(), String> {
     let changed = conn
         .execute(
-            "UPDATE notes SET content=?1, modified_at=?2 WHERE id=?3 AND COALESCE(content,'')<>?1",
+            "UPDATE notes SET content=?1, modified_at=?2, generated_title_untouched=0 WHERE id=?3 AND COALESCE(content,'')<>?1",
             params![content, now_millis(), id],
         )
         .map_err(|e| e.to_string())?;
@@ -2017,12 +2069,12 @@ fn set_node_archived_in_conn(conn: &Connection, id: &str, archived: bool) -> Res
     let now = now_millis();
     let changed = if archived {
         conn.execute(
-            "UPDATE notes SET archived_at=?1, modified_at=?1 WHERE id=?2 AND archived_at IS NULL",
+            "UPDATE notes SET archived_at=?1, modified_at=?1, generated_title_untouched=0 WHERE id=?2 AND archived_at IS NULL",
             params![now, id],
         )
     } else {
         conn.execute(
-            "UPDATE notes SET archived_at=NULL, modified_at=?1, last_unarchived_at=?1 WHERE id=?2 AND archived_at IS NOT NULL",
+            "UPDATE notes SET archived_at=NULL, modified_at=?1, last_unarchived_at=?1, generated_title_untouched=0 WHERE id=?2 AND archived_at IS NOT NULL",
             params![now, id],
         )
     }

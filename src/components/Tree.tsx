@@ -1556,7 +1556,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         }
 
         // Add to backend
-        const newNode = await addNode(null, formatDefaultNodeTitle());
+        const newNode = await addNode(null, formatDefaultNodeTitle(), true);
         if (newNode) {
           // Move the new node to the correct position if needed
           await moveNode(newNode.id, null, targetSortOrder);
@@ -1595,7 +1595,7 @@ const TreeComponent = forwardRef<TreeComponentHandle, TreeComponentProps>(
         });
         return;
       }
-      const newNode = await addNode(parentId, formatDefaultNodeTitle());
+      const newNode = await addNode(parentId, formatDefaultNodeTitle(), true);
       if (newNode) {
         setOpenItems((prevOpen) => {
           if (prevOpen.has(parentId)) return prevOpen;
