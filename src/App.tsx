@@ -228,6 +228,24 @@ function App() {
           );
         }
       }
+      if (event.key === "treenote-housekeeping-delete-result" && event.newValue) {
+        try {
+          const payload = JSON.parse(event.newValue) as {
+            deletedIds?: string[]; notebookPath?: string;
+          };
+          if (Array.isArray(payload.deletedIds) && payload.deletedIds.length && payload.notebookPath) {
+            void invoke<{ database_path: string }>("get_settings").then((settings) => {
+              if (settings.database_path !== payload.notebookPath) return;
+              const removed = new Set(payload.deletedIds);
+              setSelectedNodeId((id) => id && removed.has(id) ? null : id);
+              setPendingDeleteId((id) => id && removed.has(id) ? null : id);
+              setReloadKey((key) => key + 1);
+            }).catch((error) => console.error("Failed to update tree after housekeeping deletion:", error));
+          }
+        } catch {
+          /* ignore malformed cleanup result */
+        }
+      }
       if (event.key === "treenote-housekeeping-archive-result" && event.newValue) {
         try {
           const result = JSON.parse(event.newValue) as ArchiveSweepResult;

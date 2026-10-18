@@ -1117,7 +1117,7 @@ function OptionsApp() {
 
         <OptionsSection
           title="Housekeeping"
-          description="Move inactive branches out of the active tree without deleting notes."
+          description="Review inactive branches for archiving or safely clean up unused empty notes."
           status={sectionMessages.housekeeping}
         >
           <label className="options-field options-checkbox-field">
@@ -1169,7 +1169,7 @@ function OptionsApp() {
             </button>
           </div>
           <p className="options-field-hint">
-            Review opens in a separate, resizable window with a branch list and full text preview.
+            Review opens in a separate, resizable window. Archive inactive branches or switch to manual empty-note cleanup. No notes are deleted automatically.
             You can process fixed groups of 20 without reshuffling unchecked notes.
           </p>
         </OptionsSection>

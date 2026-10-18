@@ -37,7 +37,8 @@ The production build deliberately disables WebView developer tools and browser a
 - `src/components/Tree.tsx` — tree interaction/rendering, filtering and archive visibility
 - `src/components/TextPanel.tsx` — editor and search
 - `src/OptionsApp.tsx` — Settings, including archive scheduling and launcher
-- `src/HousekeepingReviewApp.tsx` / `housekeeping.html` — independent, resizable archive-review window
+- `src/HousekeepingReviewApp.tsx` / `housekeeping.html` — independent, resizable housekeeping review window
+- `src/EmptyCleanupReviewApp.tsx` — manual-only empty-note deletion review (shared fixed-group session)
 - `src/lib/archiveReviewSession.ts` — fixed candidate groups, reviewed/kept/archived selection state
 - `src/lib/openHousekeepingReview.ts` — create or focus the singleton review window
 - `src/lib/tree.ts` — frontend wrappers around Tauri tree commands
@@ -46,6 +47,7 @@ The production build deliberately disables WebView developer tools and browser a
 - `src-tauri/src/main.rs` — backend entry point and Tauri commands
 - `src-tauri/src/tree.rs` — tree data structures/serialization
 - `src-tauri/src/storage.rs` — schema/migrations, database operations, settings, notebook switching and restore
+- `src-tauri/src/cleanup.rs` — conservative, transactionally revalidated empty-leaf cleanup
 - `src-tauri/src/data_root.rs` — data-root resolution and standard folder layout
 - `src-tauri/src/managed_notebook.rs` — managed notebook path/name validation
 - `src-tauri/src/backup.rs` / `backup_meta.rs` — managed backup retention/metadata
@@ -57,7 +59,7 @@ The production build deliberately disables WebView developer tools and browser a
 
 TreeNote's configured data root contains `notebooks/`, `backups/`, `exports/` and `settings.json`. One notebook is active per running app instance. Ordinary notebook creation/switching is limited to managed `.sqlite3` files directly inside `notebooks/`.
 
-The current notes schema is version 2 and contains hierarchy, plain-text content, persisted expansion state, lifecycle/archive metadata, local `last_accessed_at` and logical `last_unarchived_at`. Automatic inactive-branch archiving is optional; manual review is launched from Settings → Housekeeping and runs in a dedicated two-pane Tauri window. Candidates are frozen into 20-branch groups for the duration of the review; partial archiving never shuffles new candidates into a reviewed group. New scans are explicit, and the backend still revalidates archive actions transactionally. The default inactivity threshold is 90 days. Legacy creation/modification timestamps remain `NULL` rather than being invented. See [AGENTS.md](AGENTS.md) for the invariants around migrations, `modified_at`, archive inheritance and expansion persistence.
+The current notes schema is version 3 and contains hierarchy, plain-text content, persisted expansion state, lifecycle/archive metadata, local `last_accessed_at` and logical `last_unarchived_at`. Automatic inactive-branch archiving is optional; manual review is launched from Settings → Housekeeping and runs in a dedicated two-pane Tauri window. Candidates are frozen into 20-branch groups for the duration of the review; partial archiving never shuffles new candidates into a reviewed group. New scans are explicit, and the backend still revalidates archive actions transactionally. The default inactivity threshold is 90 days. Legacy creation/modification timestamps remain `NULL` rather than being invented. Schema v3 adds `generated_title_untouched`, set only on new default-titled UI notes and cleared by title/content edits or manual archive toggles. Legacy/imported notes cannot qualify for manual empty-note cleanup. Destructive cleanup uses fixed groups, a confirmation, a managed **locked** safety backup, and transactional single-leaf revalidation. It does not run automatically or implement sync. See [AGENTS.md](AGENTS.md) for the invariants around migrations, `modified_at`, archive inheritance and expansion persistence.
 
 The app-lock password protects UI access only; the SQLite file itself is not encrypted.
 

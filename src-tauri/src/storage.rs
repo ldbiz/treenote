@@ -26,6 +26,7 @@ use crate::backup_meta::{
 use crate::atomic_file;
 use crate::data_root::{self, DEFAULT_NOTEBOOK_FILENAME};
 use crate::housekeeping::{self, ArchivePreview, ArchiveSweepResult};
+use crate::cleanup::{self, EmptyCleanupPreview, EmptyCleanupResult};
 use crate::managed_notebook;
 use crate::notebook_lock::{self, NotebookLock};
 use crate::tree::TreeNode;
@@ -42,7 +43,8 @@ CREATE TABLE IF NOT EXISTS notes (
     modified_at INTEGER,
     archived_at INTEGER,
     last_accessed_at INTEGER,
-    last_unarchived_at INTEGER
+    last_unarchived_at INTEGER,
+    generated_title_untouched INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS notes_parent_id_idx ON notes(parent_id);";
 
@@ -67,8 +69,9 @@ const CURRENT_NOTES_COLUMNS: &[&str] = &[
     "archived_at",
     "last_accessed_at",
     "last_unarchived_at",
+    "generated_title_untouched",
 ];
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 const RESTORE_ATTACH_ALIAS: &str = "restore_src";
 
@@ -239,6 +242,7 @@ pub(crate) fn ensure_db_schema(conn: &Connection) -> rusqlite::Result<()> {
         ("archived_at", "ALTER TABLE notes ADD COLUMN archived_at INTEGER"),
         ("last_accessed_at", "ALTER TABLE notes ADD COLUMN last_accessed_at INTEGER"),
         ("last_unarchived_at", "ALTER TABLE notes ADD COLUMN last_unarchived_at INTEGER"),
+        ("generated_title_untouched", "ALTER TABLE notes ADD COLUMN generated_title_untouched INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute_batch(sql)?;
@@ -429,6 +433,9 @@ pub static SETTINGS: Lazy<Mutex<AppSettings>> =
     Lazy::new(|| Mutex::new(AppSettings::placeholder()));
 static DB_CONNECTION: OnceCell<Mutex<Connection>> = OnceCell::new();
 static NOTEBOOK_LOCK: Mutex<Option<NotebookLock>> = Mutex::new(None);
+// Conservatively protect the note currently/most recently open in the editor,
+// even if a long-running session makes its persisted last access look old.
+static EDITOR_OPEN_NOTE: Mutex<Option<String>> = Mutex::new(None);
 
 fn db_connection() -> Result<MutexGuard<'static, Connection>, String> {
     DB_CONNECTION
@@ -885,6 +892,57 @@ pub fn execute_inactive_archive(
     }
     let mut conn = db_connection()?;
     housekeeping::execute(&mut conn, s.housekeeping_archive_after_days, now_millis(), Some(&previewed_ids))
+}
+
+/// Manual-only empty-note cleanup. Preview never records a note access.
+pub fn preview_empty_note_cleanup() -> Result<EmptyCleanupPreview, String> {
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    let conn = db_connection()?;
+    let mut preview = cleanup::preview(&conn, s.housekeeping_archive_after_days, now_millis())?;
+    if let Some(open) = EDITOR_OPEN_NOTE.lock().map_err(|e| e.to_string())?.as_deref() {
+        preview.candidates.retain(|note| note.id != open);
+        preview.total_notes = preview.candidates.len();
+    }
+    preview.notebook_path = s.database_path.clone();
+    Ok(preview)
+}
+
+/// Create and lock a managed, verified SQLite safety snapshot before touching
+/// a single note. The settings lock prevents notebook switches during backup
+/// and deletion; the DB transaction revalidates everything against new edits.
+pub fn execute_empty_note_cleanup(
+    previewed_ids: Vec<String>,
+    expected_notebook_path: String,
+    expected_days: u64,
+) -> Result<EmptyCleanupResult, String> {
+    if previewed_ids.is_empty() {
+        return Err("Select at least one note to delete.".into());
+    }
+    let s = SETTINGS.lock().map_err(|e| e.to_string())?;
+    if s.database_path != expected_notebook_path || s.housekeeping_archive_after_days != expected_days {
+        return Err("The notebook or inactivity threshold changed. Start a new scan.".into());
+    }
+    let (notebook_dir, timestamp) = create_managed_backup_without_prune(&s, None)?;
+    let (backup, _) = finalize_backup_prune_and_metadata(
+        &notebook_dir, timestamp, Some("Before empty-note cleanup".into()), true,
+    )?;
+    if !backup.metadata_saved || !Path::new(&backup.path).is_file() {
+        return Err("The safety backup could not be retained and locked. No notes were deleted.".into());
+    }
+    let mut conn = db_connection()?;
+    // Acquiring the DB lock first serialises this with any new editor load.
+    // Exclusion is repeated here, not trusted to the earlier preview.
+    let active = EDITOR_OPEN_NOTE.lock().map_err(|e| e.to_string())?.clone();
+    let allowed: Vec<String> = previewed_ids.iter()
+        .filter(|id| active.as_deref() != Some(id.as_str())).cloned().collect();
+    let mut result = cleanup::execute(&mut conn, expected_days, now_millis(), &allowed)?;
+    if let Some(active) = active {
+        if previewed_ids.contains(&active) && !result.skipped_ids.contains(&active) {
+            result.skipped_ids.push(active);
+        }
+    }
+    result.backup_path = backup.path;
+    Ok(result)
 }
 
 fn housekeeping_due(s: &AppSettings, now: i64) -> bool {
@@ -1427,6 +1485,9 @@ fn restore_notes_from_backup(
         .map(|column| {
             if legacy_expansion && *column == "is_expanded" {
                 "0 AS is_expanded".to_string()
+            } else if *column == "generated_title_untouched" &&
+                !backup_columns.iter().any(|candidate| candidate == column) {
+                "0 AS generated_title_untouched".to_string()
             } else if backup_columns.iter().any(|candidate| candidate == column) {
                 (*column).to_string()
             } else {
@@ -1680,16 +1741,24 @@ fn would_exceed_max_level(
     Ok(resulting > current_max)
 }
 
-pub fn add_node(parent_id: Option<String>, label: String) -> Result<TreeNode, String> {
+pub fn add_node(parent_id: Option<String>, label: String, generated_title: Option<bool>) -> Result<TreeNode, String> {
     let mut conn = db_connection()?;
-    add_node_in_conn(&mut conn, parent_id, label)
+    add_node_with_provenance_in_conn(&mut conn, parent_id, label, generated_title.unwrap_or(false))
 }
 
-fn add_node_in_conn(
+// Existing programmatic/test creation paths deliberately do not claim UI provenance.
+#[cfg(test)]
+fn add_node_in_conn(conn: &mut Connection, parent_id: Option<String>, label: String) -> Result<TreeNode, String> {
+    add_node_with_provenance_in_conn(conn, parent_id, label, false)
+}
+
+fn add_node_with_provenance_in_conn(
     conn: &mut Connection,
     parent_id: Option<String>,
     label: String,
+    generated_title: bool,
 ) -> Result<TreeNode, String> {
+    let generated = generated_title && cleanup::is_timestamp_title(&label);
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     if let Some(ref parent) = parent_id {
         let parent_level = note_level(&tx, parent)?;
@@ -1705,8 +1774,8 @@ fn add_node_in_conn(
     )
     .map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT INTO notes (id,parent_id,label,is_expanded,sort_order,content,created_at,modified_at,archived_at) VALUES (?1,?2,?3,1,0,'',?4,?4,NULL)",
-        params![id, parent_id, label, now],
+        "INSERT INTO notes (id,parent_id,label,is_expanded,sort_order,content,created_at,modified_at,archived_at,generated_title_untouched) VALUES (?1,?2,?3,1,0,'',?4,?4,NULL,?5)",
+        params![id, parent_id, label, now, if generated { 1 } else { 0 }],
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -1736,7 +1805,7 @@ fn note_exists(conn: &Connection, id: &str) -> Result<bool, String> {
 fn update_node_in_conn(conn: &Connection, id: &str, new_label: &str) -> Result<(), String> {
     let changed = conn
         .execute(
-            "UPDATE notes SET label=?1, modified_at=?2 WHERE id=?3 AND label<>?1",
+            "UPDATE notes SET label=?1, modified_at=?2, generated_title_untouched=0 WHERE id=?3 AND label<>?1",
             params![new_label, now_millis(), id],
         )
         .map_err(|e| e.to_string())?;
@@ -1943,6 +2012,7 @@ pub fn get_node_content(id: String) -> Result<String, String> {
         )
         .map_err(|e| e.to_string())?;
     record_node_access_in_conn(&conn, &id, now_millis())?;
+    *EDITOR_OPEN_NOTE.lock().map_err(|e| e.to_string())? = Some(id);
     Ok(content)
 }
 
@@ -1998,7 +2068,7 @@ pub fn get_node(id: String) -> Result<TreeNode, String> {
 fn update_node_content_in_conn(conn: &Connection, id: &str, content: &str) -> Result<(), String> {
     let changed = conn
         .execute(
-            "UPDATE notes SET content=?1, modified_at=?2 WHERE id=?3 AND COALESCE(content,'')<>?1",
+            "UPDATE notes SET content=?1, modified_at=?2, generated_title_untouched=0 WHERE id=?3 AND COALESCE(content,'')<>?1",
             params![content, now_millis(), id],
         )
         .map_err(|e| e.to_string())?;
@@ -2017,12 +2087,12 @@ fn set_node_archived_in_conn(conn: &Connection, id: &str, archived: bool) -> Res
     let now = now_millis();
     let changed = if archived {
         conn.execute(
-            "UPDATE notes SET archived_at=?1, modified_at=?1 WHERE id=?2 AND archived_at IS NULL",
+            "UPDATE notes SET archived_at=?1, modified_at=?1, generated_title_untouched=0 WHERE id=?2 AND archived_at IS NULL",
             params![now, id],
         )
     } else {
         conn.execute(
-            "UPDATE notes SET archived_at=NULL, modified_at=?1, last_unarchived_at=?1 WHERE id=?2 AND archived_at IS NOT NULL",
+            "UPDATE notes SET archived_at=NULL, modified_at=?1, last_unarchived_at=?1, generated_title_untouched=0 WHERE id=?2 AND archived_at IS NOT NULL",
             params![now, id],
         )
     }
@@ -3980,6 +4050,83 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v3_backup_restore_retains_generated_provenance() {
+        let dir = std::env::temp_dir().join(format!("treenote-provenance-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let backup_path = dir.join("backup.sqlite3");
+        let backup = Connection::open(&backup_path).unwrap();
+        ensure_db_schema(&backup).unwrap();
+        backup.execute(
+            "INSERT INTO notes (id,label,sort_order,content,created_at,modified_at,generated_title_untouched)
+             VALUES ('new','Sun 11:22:33 26/01/02',0,'',100,100,1)",
+            [],
+        ).unwrap();
+        drop(backup);
+        let live = setup_test_conn();
+        restore_notes_from_backup_path(&live, &backup_path).unwrap();
+        let flag: i64 = live.query_row(
+            "SELECT generated_title_untouched FROM notes WHERE id='new'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(flag, 1);
+        assert_eq!(cleanup::preview(&live, 90, 200 * 86_400_000).unwrap().candidates.len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn v2_to_v3_does_not_infer_generated_title_provenance() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY, parent_id TEXT, label TEXT NOT NULL,
+                is_expanded INTEGER, sort_order INTEGER NOT NULL, content TEXT,
+                created_at INTEGER, modified_at INTEGER, archived_at INTEGER,
+                last_accessed_at INTEGER, last_unarchived_at INTEGER
+             );
+             PRAGMA user_version=2;
+             INSERT INTO notes (id,label,sort_order,content,created_at,modified_at)
+               VALUES ('old','Sun 11:22:33 26/01/02',0,'',123,123);"
+        ).unwrap();
+        ensure_db_schema(&conn).unwrap();
+        let marker: i64 = conn.query_row(
+            "SELECT generated_title_untouched FROM notes WHERE id='old'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(marker, 0);
+        assert!(cleanup::preview(&conn, 90, 200 * 86_400_000).unwrap().candidates.is_empty());
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn generated_provenance_is_permanent_once_title_or_content_changes() {
+        let mut conn = setup_test_conn();
+        let original = "Sun 11:22:33 26/01/02";
+        let node = add_node_with_provenance_in_conn(&mut conn, None, original.into(), true).unwrap();
+        let marker = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT generated_title_untouched FROM notes WHERE id=?1",
+                [&node.id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(marker(&conn), 1);
+        update_node_in_conn(&conn, &node.id, "Renamed").unwrap();
+        update_node_in_conn(&conn, &node.id, original).unwrap();
+        assert_eq!(marker(&conn), 0);
+
+        let second = add_node_with_provenance_in_conn(&mut conn, None, original.into(), true).unwrap();
+        update_node_content_in_conn(&conn, &second.id, "text").unwrap();
+        update_node_content_in_conn(&conn, &second.id, "").unwrap();
+        let second_marker: i64 = conn.query_row(
+            "SELECT generated_title_untouched FROM notes WHERE id=?1",
+            [&second.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(second_marker, 0);
+        let untrusted = add_node_with_provenance_in_conn(&mut conn, None, "User title".into(), true).unwrap();
+        let flag: i64 = conn.query_row(
+            "SELECT generated_title_untouched FROM notes WHERE id=?1",
+            [&untrusted.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(flag, 0);
     }
 
     #[test]
