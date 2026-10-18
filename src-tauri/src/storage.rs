@@ -4053,6 +4053,29 @@ mod tests {
     }
 
     #[test]
+    fn v3_backup_restore_retains_generated_provenance() {
+        let dir = std::env::temp_dir().join(format!("treenote-provenance-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let backup_path = dir.join("backup.sqlite3");
+        let backup = Connection::open(&backup_path).unwrap();
+        ensure_db_schema(&backup).unwrap();
+        backup.execute(
+            "INSERT INTO notes (id,label,sort_order,content,created_at,modified_at,generated_title_untouched)
+             VALUES ('new','Sun 11:22:33 26/01/02',0,'',100,100,1)",
+            [],
+        ).unwrap();
+        drop(backup);
+        let live = setup_test_conn();
+        restore_notes_from_backup_path(&live, &backup_path).unwrap();
+        let flag: i64 = live.query_row(
+            "SELECT generated_title_untouched FROM notes WHERE id='new'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(flag, 1);
+        assert_eq!(cleanup::preview(&live, 90, 200 * 86_400_000).unwrap().candidates.len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn v2_to_v3_does_not_infer_generated_title_provenance() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(

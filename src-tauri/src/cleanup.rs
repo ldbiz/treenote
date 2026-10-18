@@ -58,7 +58,7 @@ pub fn is_timestamp_title(title: &str) -> bool {
     if b.len() != 21 || !b.iter().all(u8::is_ascii) {
         return false;
     }
-    if !matches!(&b[0..3], b"Sun" | b"Mon" | b"Tue" | b"Wed" | b"Thu" | b"Fri" | b"Sat") {
+    if !matches!(&title[0..3], "Sun" | "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat") {
         return false;
     }
     if b[3] != b' ' || b[6] != b':' || b[9] != b':'
@@ -316,6 +316,20 @@ mod tests {
         ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
             .map(Result::unwrap).collect();
         assert_eq!(siblings, vec![("b".into(),0),("c".into(),1)]);
+    }
+
+    #[test]
+    fn sqlite_abort_rolls_back_the_whole_group() {
+        let mut conn = db();
+        put(&conn, "a", None, TITLE, true);
+        put(&conn, "b", None, TITLE, true);
+        conn.execute_batch(
+            "CREATE TRIGGER prevent_b BEFORE DELETE ON notes WHEN OLD.id='b'
+             BEGIN SELECT RAISE(ABORT, 'disk or constraint failure'); END;"
+        ).unwrap();
+        assert!(execute(&mut conn, 90, NOW, &["a".into(), "b".into()]).is_err());
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]
