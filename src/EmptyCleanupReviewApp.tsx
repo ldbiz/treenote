@@ -196,7 +196,7 @@ export default function EmptyCleanupReviewApp({ onArchive }: { onArchive: () => 
     if (result.deletedIds.length) {
       try {
         localStorage.setItem("treenote-housekeeping-delete-result",
-          JSON.stringify({ deletedIds: result.deletedIds, at: Date.now() }));
+          JSON.stringify({ deletedIds: result.deletedIds, notebookPath: review.source.notebookPath, at: Date.now() }));
       } catch (error) {
         console.error("Deleted notes, but could not notify the main window:", error);
       }

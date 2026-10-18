@@ -50,7 +50,7 @@ Notebook switching/creation is intentionally constrained to managed `.sqlite3` f
 
 ## Current note schema and invariants
 
-Current SQLite schema version: `PRAGMA user_version = 2`.
+Current SQLite schema version: `PRAGMA user_version = 3`.
 
 The `notes` table contains:
 
@@ -65,6 +65,7 @@ The `notes` table contains:
 - `archived_at`
 - `last_accessed_at`
 - `last_unarchived_at`
+- `generated_title_untouched` (0/1: conservative, explicit default-title provenance)
 
 Database changes must use an explicit, tested migration. Opening an older valid TreeNote notebook must remain supported. Do not fabricate historical lifecycle timestamps during migration.
 
@@ -108,7 +109,16 @@ Keep explicit archive state in storage and derived/effective archive state in th
 - The existing tree context menu also supports explicit Archive/Archive branch/Unarchive for individual notes and branches, independently of the inactivity threshold.
 - Scheduling preferences and last-run bookkeeping reside in install-local settings, keyed per notebook. They are not part of logical notebook state and should not trigger future sync.
 - TreeNote JSON preserves `last_unarchived_at` (logical lifecycle state) but does not export `last_accessed_at` (local activity state). Physical SQLite backups naturally preserve both.
-- This tranche does **not** implement automatic deletion or merging. The next issue #25 slice may delete empty childless notes retaining the default timestamp title, with preview and safety checks.
+### Manual empty-note cleanup (issue #25)
+
+- Standalone Housekeeping review now offers a **separate empty-note cleanup workflow** alongside reversible archiving. No automatic deletion, even when automatic archiving is enabled. Merging non-empty notes remains deferred.
+- Eligibility deliberately requires `generated_title_untouched=1`: only notes created through the normal frontend default-title generator after schema v3 can receive the marker. It must be set **at creation**, not inferred later from the title pattern or timestamps. A label or content change permanently clears the marker even if the original value is restored; explicit archive/unarchive also clears it. Reordering updates `modified_at` but does not clear title provenance. No v0/v1/v2 note is backfilled; imported, JSON-restored and programmatically created notes default to 0.
+- The note must be childless (including archived children), have exactly empty text (NULL or zero-length; whitespace is content), retain the timestamp-title format, and have reliable `created_at` and `modified_at` at least the configured inactivity period old. Activity and explicit unarchive must also be old. Exclude explicitly/effectively archived notes and invalid/orphaned hierarchies. This is intentionally stricter than archive candidacy, which permits unknown legacy dates.
+- Each manual review has the same **fixed, stable groups of 20** as archive review. All start checked; unchecked notes are kept, and a new scan is explicit. Actual deletion always requires a separate confirmation per submitted group.
+- The storage wrapper first creates a verified normal managed SQLite safety backup, **locked and labelled** for retention. If snapshot, retention-lock metadata or verification fails, refuse deletion. The backend revalidates each selected candidate under an immediate SQLite write transaction, deletes **single leaf rows only** (never recursive branch deletion), compacts affected siblings' sort order, and reports deleted and skipped IDs. Unsaved editor content must be flushed before preview and execution; a failed flush prevents cleanup. The main tree listens for completed deletion and refreshes selection/search state.
+- Physical SQLite backup/restore preserves the provenance marker. Native JSON export deliberately does not certify provenance and imported notes start at 0. The flag is logical note provenance, not local access history: future sync snapshots should preserve it, while recording intentional deletions as logical state transitions (not confusing deleted notes with earlier snapshot states). No sync/tombstone protocol is introduced here.
+- Deleting an empty note is **not** archiving it. Recovery requires a backup restore, which may also revert subsequent edits; the app must not imply undo is available.
+
 
 ### Expansion semantics
 
