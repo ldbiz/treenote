@@ -433,6 +433,9 @@ pub static SETTINGS: Lazy<Mutex<AppSettings>> =
     Lazy::new(|| Mutex::new(AppSettings::placeholder()));
 static DB_CONNECTION: OnceCell<Mutex<Connection>> = OnceCell::new();
 static NOTEBOOK_LOCK: Mutex<Option<NotebookLock>> = Mutex::new(None);
+// Conservatively protect the note currently/most recently open in the editor,
+// even if a long-running session makes its persisted last access look old.
+static EDITOR_OPEN_NOTE: Mutex<Option<String>> = Mutex::new(None);
 
 fn db_connection() -> Result<MutexGuard<'static, Connection>, String> {
     DB_CONNECTION
@@ -896,6 +899,10 @@ pub fn preview_empty_note_cleanup() -> Result<EmptyCleanupPreview, String> {
     let s = SETTINGS.lock().map_err(|e| e.to_string())?;
     let conn = db_connection()?;
     let mut preview = cleanup::preview(&conn, s.housekeeping_archive_after_days, now_millis())?;
+    if let Some(open) = EDITOR_OPEN_NOTE.lock().map_err(|e| e.to_string())?.as_deref() {
+        preview.candidates.retain(|note| note.id != open);
+        preview.total_notes = preview.candidates.len();
+    }
     preview.notebook_path = s.database_path.clone();
     Ok(preview)
 }
@@ -923,7 +930,17 @@ pub fn execute_empty_note_cleanup(
         return Err("The safety backup could not be retained and locked. No notes were deleted.".into());
     }
     let mut conn = db_connection()?;
-    let mut result = cleanup::execute(&mut conn, expected_days, now_millis(), &previewed_ids)?;
+    // Acquiring the DB lock first serialises this with any new editor load.
+    // Exclusion is repeated here, not trusted to the earlier preview.
+    let active = EDITOR_OPEN_NOTE.lock().map_err(|e| e.to_string())?.clone();
+    let allowed: Vec<String> = previewed_ids.iter()
+        .filter(|id| active.as_deref() != Some(id.as_str())).cloned().collect();
+    let mut result = cleanup::execute(&mut conn, expected_days, now_millis(), &allowed)?;
+    if let Some(active) = active {
+        if previewed_ids.contains(&active) && !result.skipped_ids.contains(&active) {
+            result.skipped_ids.push(active);
+        }
+    }
     result.backup_path = backup.path;
     Ok(result)
 }
@@ -1995,6 +2012,7 @@ pub fn get_node_content(id: String) -> Result<String, String> {
         )
         .map_err(|e| e.to_string())?;
     record_node_access_in_conn(&conn, &id, now_millis())?;
+    *EDITOR_OPEN_NOTE.lock().map_err(|e| e.to_string())? = Some(id);
     Ok(content)
 }
 
@@ -4032,6 +4050,60 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v2_to_v3_does_not_infer_generated_title_provenance() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY, parent_id TEXT, label TEXT NOT NULL,
+                is_expanded INTEGER, sort_order INTEGER NOT NULL, content TEXT,
+                created_at INTEGER, modified_at INTEGER, archived_at INTEGER,
+                last_accessed_at INTEGER, last_unarchived_at INTEGER
+             );
+             PRAGMA user_version=2;
+             INSERT INTO notes (id,label,sort_order,content,created_at,modified_at)
+               VALUES ('old','Sun 11:22:33 26/01/02',0,'',123,123);"
+        ).unwrap();
+        ensure_db_schema(&conn).unwrap();
+        let marker: i64 = conn.query_row(
+            "SELECT generated_title_untouched FROM notes WHERE id='old'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(marker, 0);
+        assert!(cleanup::preview(&conn, 90, 200 * 86_400_000).unwrap().candidates.is_empty());
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn generated_provenance_is_permanent_once_title_or_content_changes() {
+        let mut conn = setup_test_conn();
+        let original = "Sun 11:22:33 26/01/02";
+        let node = add_node_with_provenance_in_conn(&mut conn, None, original.into(), true).unwrap();
+        let marker = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT generated_title_untouched FROM notes WHERE id=?1",
+                [&node.id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(marker(&conn), 1);
+        update_node_in_conn(&conn, &node.id, "Renamed").unwrap();
+        update_node_in_conn(&conn, &node.id, original).unwrap();
+        assert_eq!(marker(&conn), 0);
+
+        let second = add_node_with_provenance_in_conn(&mut conn, None, original.into(), true).unwrap();
+        update_node_content_in_conn(&conn, &second.id, "text").unwrap();
+        update_node_content_in_conn(&conn, &second.id, "").unwrap();
+        let second_marker: i64 = conn.query_row(
+            "SELECT generated_title_untouched FROM notes WHERE id=?1",
+            [&second.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(second_marker, 0);
+        let untrusted = add_node_with_provenance_in_conn(&mut conn, None, "User title".into(), true).unwrap();
+        let flag: i64 = conn.query_row(
+            "SELECT generated_title_untouched FROM notes WHERE id=?1",
+            [&untrusted.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(flag, 0);
     }
 
     #[test]
