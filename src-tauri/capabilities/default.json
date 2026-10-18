@@ -4,7 +4,8 @@
   "description": "Capability for the main window",
   "windows": [
     "main",
-    "options"
+    "options",
+    "housekeeping-review"
   ],
   "permissions": [
     "core:default",
@@ -14,6 +15,7 @@
     "core:window:allow-hide",
     "core:window:allow-unminimize",
     "core:window:allow-set-focus",
+    "core:window:allow-close",
     "core:webview:allow-create-webview-window",
     "opener:default",
     "dialog:allow-open",

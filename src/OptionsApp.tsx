@@ -29,6 +29,7 @@ import {
   writeFlushRequest,
 } from "./lib/editorFlushBridge";
 import { joinExportPath } from "./lib/exportPath";
+import { openHousekeepingReviewWindow } from "./lib/openHousekeepingReview";
 import "./styles/theme.css";
 
 const THEME_OPTIONS: {
@@ -51,10 +52,12 @@ type AppSettings = {
   editor_font_family: string;
   minimize_to_tray: boolean;
   backup_before_restore: boolean;
+  housekeeping_auto_archive: boolean;
+  housekeeping_archive_after_days: number;
 };
 
 type MessageKind = "success" | "error" | "info";
-type SectionId = "general" | "appearance" | "notebook" | "conversion" | "backups" | "security";
+type SectionId = "general" | "appearance" | "notebook" | "conversion" | "backups" | "housekeeping" | "security";
 type SectionMessage = { kind: MessageKind; text: string };
 
 function notebookFileName(path: string): string {
@@ -636,6 +639,37 @@ function OptionsApp() {
     }
   };
 
+  const persistHousekeeping = async (enabled: boolean, days: number) => {
+    if (!settings) return;
+    clearSectionMessage("housekeeping");
+    try {
+      const saved = await invoke<AppSettings>("update_housekeeping_settings", {
+        enabled,
+        archiveAfterDays: days,
+      });
+      setSettings(saved);
+    } catch (error) {
+      try {
+        setSettings(await invoke<AppSettings>("get_settings"));
+      } catch {
+        // Preserve the previous form state if settings reload also fails.
+      }
+      showSectionMessage("housekeeping", "error", "Failed to save setting: " + errorText(error));
+    }
+  };
+
+  const openHousekeepingReview = async () => {
+    if (!settings) return;
+    clearSectionMessage("housekeeping");
+    await runAction("openHousekeepingReview", async () => {
+      try {
+        await openHousekeepingReviewWindow();
+      } catch (error) {
+        showSectionMessage("housekeeping", "error", "Unable to open archive review: " + errorText(error));
+      }
+    });
+  };
+
   const backupNow = () => {
     if (!settings) return;
     clearSectionMessage("backups");
@@ -1080,6 +1114,65 @@ function OptionsApp() {
           onConfirm={(name) => nameDialog?.onConfirm(name)}
           onCancel={() => setNameDialog(null)}
         />
+
+        <OptionsSection
+          title="Housekeeping"
+          description="Move inactive branches out of the active tree without deleting notes."
+          status={sectionMessages.housekeeping}
+        >
+          <label className="options-field options-checkbox-field">
+            <input
+              type="checkbox"
+              className="options-checkbox"
+              checked={settings?.housekeeping_auto_archive ?? false}
+              disabled={isAnyBusy || !settings}
+              onChange={(event) => {
+                if (!settings) return;
+                void persistHousekeeping(event.target.checked, settings.housekeeping_archive_after_days);
+              }}
+            />
+            <span className="options-checkbox-label">Automatically archive inactive branches</span>
+          </label>
+          <p className="options-field-hint">
+            Optional. Checks approximately daily while TreeNote is running.
+            A branch qualifies only if it and all its visible descendants have been inactive.
+          </p>
+          <label className="options-field">
+            <span className="options-field-label">Inactive for</span>
+            <select
+              className="options-control"
+              value={settings?.housekeeping_archive_after_days ?? 90}
+              disabled={isAnyBusy || !settings}
+              onChange={(event) => {
+                if (!settings) return;
+                void persistHousekeeping(settings.housekeeping_auto_archive, Number(event.target.value));
+              }}
+            >
+              {[30, 60, 90, 180, 365, 730].map((days) => (
+                <option key={days} value={days}>{days} days</option>
+              ))}
+            </select>
+          </label>
+          <p className="options-field-hint">
+            Reading or editing a note counts as activity. Legacy notes with unknown dates
+            are eligible. Manually unarchived branches are protected for a full threshold period.
+            To archive or unarchive an individual note or branch, right-click it in the tree.
+          </p>
+          <div className="options-actions">
+            <button
+              type="button"
+              className="options-btn options-btn-secondary"
+              disabled={isAnyBusy || loading || !settings}
+              onClick={() => void openHousekeepingReview()}
+            >
+              {isBusy("openHousekeepingReview") ? "Opening…" : "Review inactive branches…"}
+            </button>
+          </div>
+          <p className="options-field-hint">
+            Review opens in a separate, resizable window with a branch list and full text preview.
+            You can process fixed groups of 20 without reshuffling unchecked notes.
+          </p>
+        </OptionsSection>
 
         <OptionsSection
           title="Security"

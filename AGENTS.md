@@ -50,7 +50,7 @@ Notebook switching/creation is intentionally constrained to managed `.sqlite3` f
 
 ## Current note schema and invariants
 
-Current SQLite schema version: `PRAGMA user_version = 1`.
+Current SQLite schema version: `PRAGMA user_version = 2`.
 
 The `notes` table contains:
 
@@ -63,6 +63,8 @@ The `notes` table contains:
 - `created_at`
 - `modified_at`
 - `archived_at`
+- `last_accessed_at`
+- `last_unarchived_at`
 
 Database changes must use an explicit, tested migration. Opening an older valid TreeNote notebook must remain supported. Do not fabricate historical lifecycle timestamps during migration.
 
@@ -74,6 +76,7 @@ Database changes must use an explicit, tested migration. Opening an older valid 
 - A no-op move must not update `modified_at`.
 - Archive/unarchive is a logical note change and updates that note's `modified_at`.
 - Expanding/collapsing is view state and must **not** update `modified_at`.
+- Opening a selected note records `last_accessed_at` (coalesced to at most one write per hour) without changing `modified_at`. Tree expansion, searches, backups and background operations are not accesses. This field is **local usage metadata** and must be excluded from future logical sync hashes/snapshots.
 - Duplicated notes/branches get fresh creation/modification timestamps and no archive markers.
 
 These rules matter for future sync/conflict work. Do not broaden timestamp stamping for convenience.
@@ -87,9 +90,25 @@ A note is effectively archived in the UI when it or any ancestor has an archive 
 - archiving a branch does not write `archived_at` onto every descendant;
 - a descendant may have its own independent archive marker;
 - unarchiving a parent reveals descendants except independently archived subtrees;
+- explicitly unarchiving a note sets its `last_unarchived_at` so automated housekeeping cannot immediately rearchive its descendants; this marker is logical state and is preserved in TreeNote JSON and backups;
 - the global **Show archived** view setting controls both tree visibility and search/filter scope.
 
 Keep explicit archive state in storage and derived/effective archive state in the frontend unless an issue deliberately redesigns this model.
+
+### Automatic housekeeping (issue #25)
+
+- Automatic archiving is opt-in and defaults off; it checks approximately daily while TreeNote is running and unlocked. Manual preview and confirmation are always available.
+- Default inactivity threshold is 90 days (selectable in Settings). A note is inactive when `created_at`, `modified_at` and `last_accessed_at` are all absent or older than the threshold. Do not manufacture historical timestamps: legacy NULLs count as unknown/old.
+- Only archive entire inactive branches. Recently active descendants veto their ancestor's eligibility, but an inactive child branch under an active parent can qualify separately.
+- Record an explicit archive marker on the highest eligible root only. Descendant timestamp and archive markers must not be rewritten; already effectively archived descendants are skipped.
+- A recent explicit `last_unarchived_at` protects that note and its descendants for the configured inactivity period, including independently eligible child branches.
+- Preview and execution use the same backend selector. The manual review launches from Settings → Housekeeping into a **separate, resizable Tauri window** with a two-pane layout: branch-selection list on the left and full read-only content preview on the right. The review captures a **fixed snapshot of candidate root IDs** divided into groups of 20. Each group retains its original members and positions throughout that review. Do **not** re-fetch and re-batch eligible roots after partially archiving a group; that would mix newly eligible candidates with deliberately unchecked branches. A deliberate **New scan** starts a new review and replaces the snapshot (with confirmation if choices or progress would be lost).
+- All candidates start checked by default. Users can uncheck individual branches or select all/none within the current group. **Archive checked & continue** submits only checked IDs in that visible group, updates archived and backend-rejected rows within that fixed group, marks it reviewed, and advances to the next unreviewed group. **Keep entire group** marks the group reviewed without archiving. Previously unchecked branches stay kept, not redistributed; reviewed groups can be reopened to revise kept choices. Execution revalidates IDs in a transaction and must never imply that a failed UI notification undid a successful archive.
+- Focusing a candidate in the manual preview shows a read-only text dump of that root and every descendant, sorted by sibling `sort_order`, with additional hyphens for each nesting level and each note's text beneath its title. Inspection must not change `last_accessed_at` or affect the archived/not-archived selection. A stale notebook or threshold must fail safely; a branch text preview should not rescan the entire notebook to determine eligibility, because it is purely read-only inspection. Actual archive execution must transactionally reject roots that are no longer eligible. The UI must ignore late responses from previously focused branches.
+- The existing tree context menu also supports explicit Archive/Archive branch/Unarchive for individual notes and branches, independently of the inactivity threshold.
+- Scheduling preferences and last-run bookkeeping reside in install-local settings, keyed per notebook. They are not part of logical notebook state and should not trigger future sync.
+- TreeNote JSON preserves `last_unarchived_at` (logical lifecycle state) but does not export `last_accessed_at` (local activity state). Physical SQLite backups naturally preserve both.
+- This tranche does **not** implement automatic deletion or merging. The next issue #25 slice may delete empty childless notes retaining the default timestamp title, with preview and safety checks.
 
 ### Expansion semantics
 

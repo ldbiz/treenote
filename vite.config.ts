@@ -18,6 +18,7 @@ export default defineConfig(async () => ({
       input: {
         main: resolve(__dirname, "index.html"),
         options: resolve(__dirname, "options.html"),
+        housekeeping: resolve(__dirname, "housekeeping.html"),
       },
     },
   },
