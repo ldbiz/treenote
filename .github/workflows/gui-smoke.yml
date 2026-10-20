@@ -42,4 +42,10 @@ jobs:
           if-no-files-found: ignore
       - name: Report trial outcome
         if: always()
-        run: echo "Native desktop GUI trial: ${{ steps.gui.outcome }}"
+        shell: pwsh
+        run: |
+          if ("${{ steps.gui.outcome }}" -eq "failure") {
+            Write-Warning "Hosted Windows GUI trial failed; see diagnostics (not a passing GUI test)."
+          } else {
+            Write-Host "Hosted Windows GUI trial: ${{ steps.gui.outcome }}"
+          }
