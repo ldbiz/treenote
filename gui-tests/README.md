@@ -9,11 +9,14 @@ From repository root:
 
     npm ci
     npm run build
-    cargo build --manifest-path src-tauri/Cargo.toml
+    npm run tauri build -- --debug --no-bundle
     npm install --prefix gui-tests
     npm --prefix gui-tests run smoke
 
-The debug executable is `src-tauri/target/debug/treenote.exe`. The first run
+The debug executable is `src-tauri/target/debug/treenote.exe`. Use the
+Tauri **build** CLI (with `--debug --no-bundle`) rather than plain
+`cargo build`: this packages the frontend from `frontendDist` instead
+of assuming that a Vite development server is running. The first run
 may install `tauri-driver` and download a compatible Edge WebDriver. A working
 Windows Tauri/Rust build environment is required. Do not run the release
 executable for this smoke test.
