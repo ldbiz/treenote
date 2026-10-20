@@ -25,8 +25,8 @@ jobs:
         run: npm ci
       - name: Build frontend assets
         run: npm run build
-      - name: Build debug native Tauri app
-        run: cargo build --manifest-path src-tauri/Cargo.toml
+      - name: Build debug native Tauri app with bundled frontend
+        run: npm run tauri build -- --debug --no-bundle
       - name: Install GUI runner
         run: npm install --prefix gui-tests
       - name: Trial real WebView2 automation
