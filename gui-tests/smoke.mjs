@@ -100,6 +100,11 @@ async function main() {
     const add = await browser.$('button[aria-label="New Tree"]');
     await add.waitForClickable({ timeout: 20000 });
     await add.click();
+    // Creating a new root does not select it automatically; select it in the
+    // actual tree before writing, just as the user does.
+    const createdNote = await browser.$('[role="treeitem"]');
+    await createdNote.waitForExist({ timeout: 10000 });
+    await createdNote.click();
     const editor = await browser.$("#note-editor");
     await editor.waitForEnabled({ timeout: 10000 });
     await editor.setValue(content);
