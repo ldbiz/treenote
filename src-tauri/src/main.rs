@@ -436,7 +436,10 @@ fn recover_notebook(
 }
 
 fn run_startup() -> Result<(), String> {
-    autostart::repair_path_if_present();
+    // Do not alter the user's autostart registry entry during GUI tests.
+    if !data_root::gui_test_override_requested() {
+        autostart::repair_path_if_present();
+    }
     match storage::prepare_startup()? {
         storage::StartupAction::Continue => {
             let _ = storage::run_scheduled_backup_if_due();

@@ -16,6 +16,15 @@ Unless an issue explicitly says otherwise:
 
 TreeNote currently supports one active notebook per running app instance.
 
+## Real Windows GUI tests
+
+The native WebView2 smoke harness is in [gui-tests/README.md](gui-tests/README.md).
+It uses a disposable, marker-validated data root in **debug** Tauri builds;
+production data-root behaviour is unchanged. GUI tests must drive real UI,
+Tauri commands and SQLite and never silently fall back to user data.
+Desktop GUI success must not be inferred from frontend/Rust unit tests or CI
+compilation. Keep these tests distinct from the fast test suites.
+
 ## Architecture map
 
 - `src/App.tsx` — top-level React state and coordination.

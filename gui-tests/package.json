@@ -1,0 +1,11 @@
+{
+  "name": "treenote-native-gui-tests",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": { "smoke": "node smoke.mjs" },
+  "devDependencies": {
+    "@wdio/tauri-service": "1.4.0",
+    "webdriverio": "9.31.7"
+  }
+}
