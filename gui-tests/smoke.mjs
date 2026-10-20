@@ -38,8 +38,11 @@ async function assertIsolatedNotebook() {
   const settings = JSON.parse(await fs.readFile(join(runRoot, "settings.json"), "utf8"));
   const resolvedDb = await fs.realpath(expected);
   assertWithin(resolvedDb, runRoot);
-  assert.equal(resolve(settings.database_path).toLowerCase(),
-    resolve(expected).toLowerCase(), "TreeNote opened an unexpected notebook");
+  // Both values must refer to the identical existing file (not just look
+  // similar as strings; Windows may canonicalize paths with a device prefix).
+  const actualDb = await fs.realpath(settings.database_path);
+  assert.equal(actualDb.toLowerCase(), resolvedDb.toLowerCase(),
+    "TreeNote opened an unexpected notebook");
   return expected;
 }
 
