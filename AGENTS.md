@@ -2,6 +2,8 @@
 
 This file is the operational context for coding agents working in TreeNote. Read it before changing code. For human-oriented build details, also read [DEVELOPERS.md](DEVELOPERS.md). GitHub Issues define the requested work; this file defines the stable product and architecture constraints around that work.
 
+For **active, unmerged work and the next testing task**, consult the dated [development status and handoff](docs/DEVELOPMENT_STATUS.md). In particular, do not assume an open PR's schema or features are already on `main`.
+
 ## Product scope
 
 TreeNote is a deliberately small, local-first, plain-text note application. Notes are arranged in a hierarchy and stored in SQLite. The product should continue to feel like a simple tree editor, not a document suite or an agent platform.

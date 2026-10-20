@@ -2,6 +2,8 @@
 
 For coding-agent operating rules and product invariants, read [AGENTS.md](AGENTS.md) first.
 
+See [development status and handoff](docs/DEVELOPMENT_STATUS.md) for open PRs, actual validation status, and the planned reusable Windows GUI-test work. That document is a dated snapshot; verify current GitHub state before acting.
+
 ## Stack
 
 - **Shell**: Tauri (Rust backend, web frontend)
