@@ -1,6 +1,6 @@
 # TreeNote - Alpha (still testing; risk of data loss)
 
-A minimalist plain-text note-taking app with your notes organised in a tree.
+A minimalist plain-text note-taking app with your notes organised in a tree. Inspired by [Notepad](https://apps.microsoft.com/detail/9msmlrh6lzf3) and [Flashnote](https://softvoile.com/flashnote) among others.
 
 ![TreeNote main window showing a note tree and editor](docs/screenshot.png)
 
