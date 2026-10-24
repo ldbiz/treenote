@@ -63,7 +63,40 @@ pub fn read_configured_data_root() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
+// Debug-only Windows GUI test isolation. This is not a production override.
+pub fn gui_test_override_requested() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("TREENOTE_GUI_TEST_DATA_ROOT").is_some()
+}
+
+#[cfg(debug_assertions)]
+fn isolated_gui_test_root() -> Result<Option<PathBuf>, String> {
+    let Some(raw) = std::env::var_os("TREENOTE_GUI_TEST_DATA_ROOT") else {
+        return Ok(None);
+    };
+    let reject = || "GUI test data-root isolation failed; refusing to open a notebook.".to_string();
+    let root = PathBuf::from(raw).canonicalize().map_err(|_| reject())?;
+    let temp = std::env::temp_dir().canonicalize().map_err(|_| reject())?;
+    let name = root.file_name().and_then(|name| name.to_str()).ok_or_else(reject)?;
+    if root.parent() != Some(temp.as_path()) || !name.starts_with("treenote-gui-test-") {
+        return Err(reject());
+    }
+    let token = std::env::var("TREENOTE_GUI_TEST_TOKEN").map_err(|_| reject())?;
+    if token.len() != 64 || !token.bytes().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(reject());
+    }
+    let marker = std::fs::read_to_string(root.join(".treenote-gui-test-root"))
+        .map_err(|_| reject())?;
+    if marker.trim() != token {
+        return Err(reject());
+    }
+    Ok(Some(root))
+}
+
 pub fn resolve_data_root() -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
+    if let Some(root) = isolated_gui_test_root()? {
+        return Ok(root);
+    }
     resolve_data_root_from_configured(read_configured_data_root())
 }
 

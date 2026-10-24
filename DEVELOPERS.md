@@ -89,6 +89,13 @@ npm run build
 
 CI runs frontend tests, Rust tests and the Windows installer build on every pull request to `main`.
 
+## Native Windows GUI smoke test
+
+See [gui-tests/README.md](gui-tests/README.md). Build frontend assets
+and the debug Tauri executable, then run the standalone WebdriverIO smoke
+runner using Windows WebView2 and a disposable notebook. The experimental
+Windows GUI CI job must be proven before treating it as acceptance coverage.
+
 ## Build the app binary
 
 ```bash

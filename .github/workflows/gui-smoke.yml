@@ -1,0 +1,51 @@
+name: Experimental Windows native GUI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "gui-tests/**"
+      - "src-tauri/src/data_root.rs"
+      - "src-tauri/src/main.rs"
+      - ".github/workflows/gui-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  gui-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install app dependencies
+        run: npm ci
+      - name: Build frontend assets
+        run: npm run build
+      - name: Build debug native Tauri app with bundled frontend
+        run: npm run tauri build -- --debug --no-bundle
+      - name: Install GUI runner
+        run: npm install --prefix gui-tests
+      - name: Trial real WebView2 automation
+        id: gui
+        continue-on-error: true
+        run: npm --prefix gui-tests run smoke
+      - name: Upload GUI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-gui-diagnostics
+          path: gui-tests/artifacts/
+          if-no-files-found: ignore
+      - name: Report trial outcome
+        if: always()
+        shell: pwsh
+        run: |
+          if ("${{ steps.gui.outcome }}" -eq "failure") {
+            Write-Warning "Hosted Windows GUI trial failed; see diagnostics (not a passing GUI test)."
+          } else {
+            Write-Host "Hosted Windows GUI trial: ${{ steps.gui.outcome }}"
+          }
