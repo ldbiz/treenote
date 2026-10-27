@@ -2,7 +2,7 @@
 
 For coding-agent operating rules and product invariants, read [AGENTS.md](AGENTS.md) first.
 
-See [development status and handoff](docs/DEVELOPMENT_STATUS.md) for open PRs, actual validation status, and the planned reusable Windows GUI-test work. That document is a dated snapshot; verify current GitHub state before acting.
+See [development status and handoff](docs/DEVELOPMENT_STATUS.md) for open PRs, verified validation status, the bounded experimental GUI-smoke evaluation and PR #35 acceptance gate. That document is a dated snapshot; verify current GitHub state before acting.
 
 ## Stack
 
