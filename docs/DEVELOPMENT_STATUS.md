@@ -1,42 +1,46 @@
-# TreeNote development status and testing handoff
+# TreeNote development status and next decision
 
-**Snapshot: 20 October 2026.** This file captures a decision and verified repository state, not a standing claim about future PR or CI status. Check GitHub before acting. See [AGENTS.md](../AGENTS.md) for product and implementation invariants and [DEVELOPERS.md](../DEVELOPERS.md) for build commands.
+**Verified snapshot: 27 October 2026.** GitHub `main`, open PRs and CI are authoritative; this document records the current development path, not an automatic claim of test completion. For stable code/product invariants consult [AGENTS.md](../AGENTS.md); for commands consult [DEVELOPERS.md](../DEVELOPERS.md).
 
-## What is on `main`
+## Shipped on `main`
 
-- `main` at the time of this snapshot is `7a9d2b5f500783e04d1d98cc3f1739271b9b7152` (merge of PR #34).
-- Archive/lifecycle functionality and optional automatic inactive-branch archiving are merged. The **merged** SQLite schema is version **2**.
-- CI tests the React/Vitest suite, Rust suite, and Windows installer build. There is **no reusable automated GUI/end-to-end test harness against the actual running Windows Tauri/WebView2 app** yet.
+- TreeNote is a local-first React/Tauri/SQLite plain-text tree editor with notebook selection, autosave, backups/restore, import/export, search/filter, and tree management.
+- [PR #30](https://github.com/ldbiz/treenote/pull/30) shipped lifecycle metadata, persisted expansion and manual/inherited archiving; [PR #34](https://github.com/ldbiz/treenote/pull/34) shipped inactivity metadata, optional automatic inactive-branch archiving and the separate Housekeeping review window with fixed groups of 20.
+- **Current merged SQLite schema is v2.** Do not represent unmerged v3 capabilities as shipped.
+- Windows CI runs frontend tests, Rust tests and installer build. These are not proof of real Tauri/WebView2 GUI acceptance.
 
-## Unmerged feature: manual empty-note cleanup (issue #25)
+## Unmerged PRs and validation status
 
-- **[Draft PR #35](https://github.com/ldbiz/treenote/pull/35)**: `feat/housekeeping-safe-empty-note-cleanup-25` -> `main`. Last observed feature head: `ca94cf6da3c479563b419ba481d19fc2bf1420d9`.
-- **Still open, draft and unmerged** on this date. [Issue #25](https://github.com/ldbiz/treenote/issues/25) also remains open. Do not merge or close either without explicit approval.
-- Only on the feature branch: schema **v3** adds explicit `generated_title_untouched` provenance, never inferred for legacy or imported notes. The cleanup is **manual only**, via the separate housekeeping review window, with frozen groups of 20, per-note selection and a destructive-action confirmation.
-- Candidates must be original generated timestamp-title, **exactly empty**, childless leaves with sufficiently old, trustworthy lifecycle/activity fields and no effective archive state. A verified, locked and labelled managed SQLite safety backup must succeed **before** any deletion. Execution revalidates inside a transaction, deletes individual leaves (not subtrees), compacts sibling ordering, and refreshes the main UI. Changed candidates are skipped.
-- These are **implementation claims to verify on the actual app**, not acceptance-test results. They do not describe what is already available on `main`.
-- **CI verified:** [Windows run #39158427547](https://github.com/ldbiz/treenote/actions/runs/39158427547) completed successfully: frontend tests, Rust tests, and Windows installer build all passed. **No real-desktop GUI acceptance test has been performed or passed.** See the PR checklist for scenarios, including negative cases.
-- PR #35's branch updates `AGENTS.md` and `DEVELOPERS.md` to document v3. Those descriptions must not be treated as merged `main` behaviour until PR #35 is merged. Reconcile this status file and documentation when that happens.
+| PR | State on 27 Oct | Significance / outstanding gate |
+| --- | --- | --- |
+| [#35](https://github.com/ldbiz/treenote/pull/35) | Open draft, unmerged | Manual cleanup of aged, truly empty, childless notes with untouched generated timestamp titles. Adds schema **v3** provenance. Transactional revalidation and a verified locked safety backup must precede deletion. [Windows CI run 39158427547](https://github.com/ldbiz/treenote/actions/runs/39158427547) passed, but **real desktop destructive-workflow acceptance has not been established**. |
+| [#36](https://github.com/ldbiz/treenote/pull/36) | Open, documentation only | This handoff; update independently of implementation. Earlier 20 Oct automation-first direction and 25 Oct closure comments are historical, superseded by this dated snapshot. |
+| [#37](https://github.com/ldbiz/treenote/pull/37) | Reopened open draft; **experimental, unmerged** | Implements isolated debug-only Windows native GUI smoke runner (WebdriverIO/Tauri), for real create/edit/restart/SQLite persistence. Standard CI passed, including [run 40228483773](https://github.com/ldbiz/treenote/actions/runs/40228483773). Hosted experimental GUI runs were cancelled; an earlier run failed to establish a WebDriver session (`DevToolsActivePort file doesn't exist`). No successful real Windows smoke is evidenced yet. **Do not merge on CI status alone.** |
 
-## Decision: build a small reusable GUI test harness before accepting PR #35
+PR #35 eligibility is intentionally conservative: legacy/imported notes are excluded; edited, renamed, recently active, archived, nonempty or descendant-bearing notes should not qualify. A fixed review snapshot uses 20-note groups; each deletion requires explicit confirmation; failure of the managed locked safety backup must prevent deletion; stale candidates are skipped. Automatic archiving never deletes. Keep [umbrella issue #25](https://github.com/ldbiz/treenote/issues/25) open after this slice.
 
-The owner elected **not** to do PR #35's large checklist manually first. Build the smallest viable **general-purpose, permanent** Windows GUI/E2E test capability, then use PR #35 as its first substantial regression suite. Avoid a comprehensive framework built speculatively.
+## Immediate decision: narrowly evaluate PR #37, not a GUI automation programme
 
-**Job 1 — standalone harness PR from current `main`:**
+The 20 October proposal to build an extensive GUI acceptance harness was reconsidered on 25 October as potentially disproportionate. PRs #36 and #37 were subsequently reopened for a **bounded local Windows/Cursor evaluation**; reopening is *not* approval for a large automation project.
 
-1. Read the repository and current Tauri v2 / Windows automation documentation before selecting tooling. Consider WebDriverIO + Tauri integration / WebDriver-based WebView2 control; prove that it attaches to **TreeNote's actual Tauri window**, not a normal Chromium tab showing `http://localhost:1420`. Evaluate compatibility and CI before committing to a driver; avoid relying on coordinates for in-WebView actions.
-2. Launch a real Windows TreeNote instance with a disposable, absolute data root. On Windows TreeNote normally resolves the root through `HKCU\Software\TreeNote\DataRoot`, otherwise platform app-data; **there is currently no test environment-variable override**. Prefer an isolated Windows CI user/runner or VM. If registry override is required, verify isolation, preserve/restore its original value, and fail closed rather than risk a real notebook. Never run destructive tests against ordinary installed user data.
-3. Prove one complete, reproducible **create -> edit -> restart -> verify persistence** GUI smoke test using the real database/backend. Add narrow diagnostics (screenshots/logs on failure), cleanup and basic Windows CI integration. If the hosted CI runner cannot operate an interactive desktop, report the blocker and a modest alternative instead of broadening scope indefinitely.
-4. Keep fast Vitest/Rust tests separate. The harness must be easy for future agents to extend for new features; document setup and how to run it. Do not weaken production WebView developer-tools restrictions.
-5. Handle genuine **native Windows dialogs** through a narrowly scoped desktop helper if necessary (e.g. AutoHotkey), rather than coordinate-clicking the WebView or adding a test-only in-page confirmation. First establish whether the selected driver can handle actual multiwindow navigation and native dialogs.
-6. Open a dedicated PR. Do not merge without approval, and do not modify PR #35's feature code merely to make the first smoke test possible.
+1. On a Windows development machine, check out PR #37 and follow [gui-tests/README.md](https://github.com/ldbiz/treenote/blob/test/windows-tauri-gui-smoke/gui-tests/README.md). Confirm isolation uses an explicitly disposable test data root and never an existing notebook. Run the minimal real desktop create/edit/restart/SQLite smoke and capture command, exit status and failure diagnostics. Do not run destructive tests against personal notebooks.
+2. Review the outcome and maintenance/driver complexity. If the smoke runs repeatably without material environment-specific work, consider keeping a **small reusable smoke test only**. Do *not* automatically expand into complex multi-window/native-dialog/destructive-cleanup automation.
+3. If the basic smoke is unreliable or requires substantial Windows driver/desktop infrastructure, **stop** and close #37 unmerged after recording evidence. Continue with focused Rust/frontend regression coverage and a bounded manual acceptance pass for #35.
+4. Either way, #35 still needs a real desktop user-workflow check and explicit approval before merge. Its backup, restore and exclusions are too consequential to accept based solely on CI. #36 can be reviewed as documentation independently, but documentation approval must not implicitly approve #35 or #37.
 
-**Job 2 — use that harness to test PR #35 against its own branch:**
+## PR #35 acceptance scope (disposable notebook only)
 
-- Exercise the separate `TreeNote — Housekeeping review` Tauri window and real confirmation dialog.
-- Use isolated, deterministic fixtures; the minimum inactivity threshold is one day, so suitable notes need deliberately aged timestamps before preview.
-- Cover fixed groups of 20, kept/unchecked notes, cancellation with no deletion or safety backup, successful locked/labelled backup before deletion, failed backup blocking deletion, post-scan changes skipped, tree/search refresh and notebook switching, unsaved editor changes, restore/provenance and sibling order. Assert actual SQLite contents and backup metadata, not just UI appearance.
-- Prefer deterministic failure injection *at the test boundary* when feasible; do not introduce production-only test flags that bypass the real destructive workflow. Use narrowly scoped native-dialog automation only where necessary.
-- Retain the resulting GUI cases as normal regressions for future PRs. Report exactly what was and was not demonstrated. If the basic harness proves disproportionately difficult, stop and ask for a decision rather than expanding the project.
+- Positive case: deliberately age several genuinely untouched empty UI-generated leaf notes, review fixed groups, uncheck some and delete only confirmed eligible notes. Inspect SQLite rows, sibling order, current tree/search refresh and selected-note state.
+- Negative cases: edited-then-cleared, renamed-then-restored, whitespace-only, imported/legacy, recently used, nonempty, archived or child-bearing notes must stay; cancellation must cause no deletion or extra safety backup.
+- Safety: confirm labelled **locked verified** pre-deletion backup and successful restore. Revalidate a candidate modified after the scan; fail safely if backup cannot be created. Backend failure injection can be tested at Rust level when GUI setup would be artificial. Confirm automatic archive never deletes notes.
+- Existing automated checks, exact scenarios tested, remaining risks and observed GUI behaviour should be recorded on PR #35; fix any defects on its feature branch. Merge **only with explicit owner approval**.
 
-**Acceptance gate:** PR #35 remains unmerged until its destructive workflow has been exercised against the running app, its backing files have been verified, and the owner approves merging. A short owner usability check can remain at the end; there is no requirement for them to execute the entire manual checklist upfront.
+## After #35
+
+1. Settle #35 first, merge only after acceptance, then update `AGENTS.md`/`DEVELOPERS.md` and this status from v2 to the actually merged schema. Close stale #36/#37 PRs as appropriate; do not leave contradictory handoff instructions.
+2. Review the residual scope of [issue #25](https://github.com/ldbiz/treenote/issues/25): old nonempty-note merging is only an idea and carries data-loss risk. Prefer deliberately deferring or scoping it rather than beginning speculative destructive housekeeping.
+3. Address small reproducible UX defects (e.g. [#32 Copy deselects text](https://github.com/ldbiz/treenote/issues/32)) in focused PRs when useful.
+4. Next substantive capability for a separate architecture review: [optional cross-device sync #5](https://github.com/ldbiz/treenote/issues/5). It is **not implemented**. Prior direction: opt-in local-first logical whole-notebook snapshots with ancestry/history, stable notebook identity, install-local sync bookkeeping, conflict/recovery design and a possible Google Drive appDataFolder provider. Keep local backups independent. Do not mix sync with #35 or #37.
+5. Preserve TreeNote's deliberately simple plain-text/local-first product scope. AI integration and richer formatting remain separate potential future features, not prerequisites.
+
+**Working principle:** use targeted automated unit/integration tests for correctness; add desktop GUI automation only where its demonstrated reliability and future reuse justify maintenance. A manual check is preferable to an expansive flaky test platform.
