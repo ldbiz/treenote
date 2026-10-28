@@ -719,7 +719,11 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
+        let generated: i64 = conn.query_row(
+            "SELECT generated_title_untouched FROM notes", [], |row| row.get(0),
+        ).expect("generated title provenance");
+        assert_eq!(generated, 0, "imports must never claim original generated title");
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(dest);
     }

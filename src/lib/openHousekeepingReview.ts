@@ -29,7 +29,7 @@ export async function openHousekeepingReviewWindow(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const win = new WebviewWindow("housekeeping-review", {
         url,
-        title: "TreeNote — Archive review",
+        title: "TreeNote — Housekeeping review",
         width: 1040,
         height: 760,
         minWidth: 780,

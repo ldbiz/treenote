@@ -27,6 +27,7 @@ import {
 } from "./lib/archiveReviewSession";
 import "./styles/theme.css";
 import "./styles/housekeeping.css";
+import EmptyCleanupReviewApp from "./EmptyCleanupReviewApp";
 
 type ArchiveCandidate = {
   id: string;
@@ -98,6 +99,7 @@ export default function HousekeepingReviewApp() {
   const { resolvedTheme } = useTheme();
   useUiZoom();
 
+  const [workflow, setWorkflow] = useState<"archive" | "cleanup">("archive");
   const [review, setReview] = useState<Review | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -297,6 +299,10 @@ export default function HousekeepingReviewApp() {
 
   const disableControls = busy !== null;
 
+  if (workflow === "cleanup") {
+    return <EmptyCleanupReviewApp onArchive={() => setWorkflow("archive")} />;
+  }
+
   return (
     <FluentProvider theme={resolvedTheme === "dark" ? webDarkTheme : webLightTheme}>
       <div className="housekeeping-root">
@@ -309,6 +315,10 @@ export default function HousekeepingReviewApp() {
             </div>}
           </div>
           <div className="housekeeping-header-actions">
+            <button type="button" className="options-btn options-btn-secondary"
+              disabled={disableControls} onClick={() => setWorkflow("cleanup")}>
+              Empty-note cleanup
+            </button>
             <button
               type="button"
               className="options-btn options-btn-secondary"
