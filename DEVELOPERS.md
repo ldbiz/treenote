@@ -91,6 +91,21 @@ npm run build
 
 CI runs frontend tests, Rust tests and the Windows installer build on every pull request to `main`.
 
+## Empty-note cleanup manual test notebook
+
+For manual acceptance of empty-note cleanup (PR #35), a developer-only fixture installs `notebooks/empty-cleanup-test.sqlite3` with exactly 45 qualifying empty leaves plus labelled negative cases. It verifies candidates using the same rules as `src-tauri/src/cleanup.rs`.
+
+Prerequisites: Python 3, automatic inactive-branch archiving **off** in Settings → Housekeeping, and the test notebook **not** open in TreeNote when generating or resetting.
+
+```powershell
+.\scripts\prepare-empty-cleanup-notebook.ps1
+.\scripts\prepare-empty-cleanup-notebook.ps1 -Reset
+.\scripts\prepare-empty-cleanup-notebook.ps1 -Reset -PurgeBackups
+.\scripts\prepare-empty-cleanup-notebook.ps1 -VerifyOnly
+```
+
+Then run `npm run tauri:dev`, switch to `empty-cleanup-test.sqlite3`, and open Settings → Housekeeping → Empty-note cleanup.
+
 ## Build the app binary
 
 ```bash
