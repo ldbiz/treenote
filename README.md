@@ -13,6 +13,8 @@ Built with Tauri and SQLite. See [DEVELOPERS.md](DEVELOPERS.md) for technical de
 - **Drag and Drop**: Easily reorganize your notes by dragging nodes
 - **Persistent Storage**: All notes are automatically saved to a local database
 - **Responsive Layout**: Adjustable split view between tree and note content
+- **Housekeeping and archiving**: Manually archive notes/branches, show or hide archived notes, and optionally automatically archive old inactive branches (opt-in; default 90 days)
+- **Safe manual empty-note cleanup**: Review eligible, old, untouched empty default-titled leaf notes and explicitly confirm deletion after a locked safety backup
 
 ## Install
 
@@ -34,6 +36,14 @@ After setup, TreeNote is in the Start Menu. The installer can also add a desktop
 - **Export Branch**: Right-click a node and choose **Export** to save that branch as JSON via a Save dialog. A temporary notification shows the saved path.
 - **Search**: Use the search bar at the bottom of the editor. Press Enter to search or move to the next match. Use the up/down buttons to step through results, and optionally enable **Filter tree** to show only matching branches.
 - **Options**: Open the settings window from the gear icon to change theme and editor font, view note/tree counts for the open notebook, switch or create notebooks, restore from a backup, set an app-lock password, or import/export via Obsidian, Joplin, TreeNote JSON, or Flashnote.
+
+### Housekeeping and data safety
+
+Open **Settings → Housekeeping** to review inactive branches for archiving or to review eligible empty notes for deletion. The reviewer opens in its own window and displays fixed groups of 20 candidates so deselected notes do not unexpectedly move into another group.
+
+Automatic archiving is **optional** and does **not** delete notes. Empty-note cleanup runs **manually only**, is deliberately conservative (it excludes imported, legacy, edited, nonempty, archived and child-bearing notes), and requires confirmation. Before any cleanup deletion, TreeNote creates a verified, labelled and locked managed SQLite safety backup. Recovery from that backup is via **Restore** and may also roll back other edits made since the snapshot; deletion is not an ordinary Undo.
+
+**Sync across devices is not yet implemented.** Notebooks and managed backups remain local. TreeNote is still alpha software: retain independent copies of valuable data.
 
 ### Conversion
 

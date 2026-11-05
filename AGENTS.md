@@ -2,6 +2,8 @@
 
 This file is the operational context for coding agents working in TreeNote. Read it before changing code. For human-oriented build details, also read [DEVELOPERS.md](DEVELOPERS.md). GitHub Issues define the requested work; this file defines the stable product and architecture constraints around that work.
 
+For the **current merged status and development priorities**, read [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md). For the **proposed, not approved** optional sync direction, read [docs/SYNC_DESIGN_PLAN.md](docs/SYNC_DESIGN_PLAN.md). Do not mistake historical PR #36/#37 GUI-harness guidance for the current plan: PR #37 was cancelled unmerged, PR #35 was manually accepted and merged on 28 October 2026.
+
 ## Product scope
 
 TreeNote is a deliberately small, local-first, plain-text note application. Notes are arranged in a hierarchy and stored in SQLite. The product should continue to feel like a simple tree editor, not a document suite or an agent platform.
@@ -109,7 +111,7 @@ Keep explicit archive state in storage and derived/effective archive state in th
 - The existing tree context menu also supports explicit Archive/Archive branch/Unarchive for individual notes and branches, independently of the inactivity threshold.
 - Scheduling preferences and last-run bookkeeping reside in install-local settings, keyed per notebook. They are not part of logical notebook state and should not trigger future sync.
 - TreeNote JSON preserves `last_unarchived_at` (logical lifecycle state) but does not export `last_accessed_at` (local activity state). Physical SQLite backups naturally preserve both.
-### Manual empty-note cleanup (issue #25)
+### Manual empty-note cleanup (issue #25; merged in PR #35)
 
 - Standalone Housekeeping review now offers a **separate empty-note cleanup workflow** alongside reversible archiving. No automatic deletion, even when automatic archiving is enabled. Merging non-empty notes remains deferred.
 - Eligibility deliberately requires `generated_title_untouched=1`: only notes created through the normal frontend default-title generator after schema v3 can receive the marker. It must be set **at creation**, not inferred later from the title pattern or timestamps. A label or content change permanently clears the marker even if the original value is restored; explicit archive/unarchive also clears it. Reordering updates `modified_at` but does not clear title provenance. No v0/v1/v2 note is backfilled; imported, JSON-restored and programmatically created notes default to 0.
@@ -201,6 +203,8 @@ For ordinary code changes, run frontend and Rust tests locally when possible. Ru
 Some tests manipulate process-global notebook state. If a group fails only together with a global SQLite/lock interaction, reproduce the failing tests individually before concluding the feature under test is broken; do not simply ignore a repeatable CI failure.
 
 ## Future direction: cloud sync
+
+The proposed implementation sequence, conflict gates and non-goals are in [docs/SYNC_DESIGN_PLAN.md](docs/SYNC_DESIGN_PLAN.md). It is a **design proposal awaiting approval**, not a shipped capability or permission to build provider integration.
 
 Cloud sync is **not implemented**. Do not add it incidentally.
 
